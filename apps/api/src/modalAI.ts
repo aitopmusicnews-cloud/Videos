@@ -1,3 +1,4 @@
+import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import type {
   ImageToVideoRequest,
   TextToImageRequest,
@@ -180,32 +181,156 @@ export async function generateCharacterFrame(
   return { imageUrl };
 }
 
-/** Character lip-sync connector. */
+type ModalMediaPayload = Record<string, string>;
+const MAX_INLINE_MEDIA_BYTES = 150 * 1024 * 1024;
+
+function absolutePublicUrl(rawUrl: string): string {
+  if (!rawUrl.startsWith("/")) return rawUrl;
+  if (!config.PUBLIC_BASE_URL) {
+    throw new Error(`Cannot expose relative media URL without PUBLIC_BASE_URL: ${rawUrl}`);
+  }
+  return new URL(rawUrl, `${config.PUBLIC_BASE_URL.replace(/\/$/, "")}/`).toString();
+}
+
+function s3KeyFromUrl(rawUrl: string): string | null {
+  if (config.STORAGE_BACKEND !== "s3" || !config.S3_BUCKET) return null;
+
+  if (rawUrl.startsWith("/media/")) {
+    return decodeURIComponent(rawUrl.slice("/media/".length));
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+
+  const path = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+  const virtualHostedPrefix = `${config.S3_BUCKET}.s3`;
+  if (parsed.hostname === config.S3_BUCKET || parsed.hostname.startsWith(`${virtualHostedPrefix}.`)) {
+    return path;
+  }
+
+  if (parsed.hostname.startsWith("s3.") || parsed.hostname === "s3.amazonaws.com") {
+    const prefix = `${config.S3_BUCKET}/`;
+    return path.startsWith(prefix) ? path.slice(prefix.length) : null;
+  }
+
+  if (config.S3_PUBLIC_URL_BASE) {
+    try {
+      const base = new URL(config.S3_PUBLIC_URL_BASE);
+      if (base.origin === parsed.origin) {
+        const basePath = base.pathname.replace(/^\/+|\/+$/g, "");
+        return basePath && path.startsWith(`${basePath}/`)
+          ? path.slice(basePath.length + 1)
+          : path;
+      }
+    } catch {
+      // An invalid base URL is already rejected by config validation.
+    }
+  }
+
+  return null;
+}
+
+async function modalMediaPayload(rawUrl: string, kind: "video" | "audio"): Promise<ModalMediaPayload> {
+  const key = s3KeyFromUrl(rawUrl);
+  if (!key) return { [`${kind}_url`]: absolutePublicUrl(rawUrl) };
+
+  const client = new S3Client({ region: config.S3_REGION! });
+  const response = await client.send(
+    new GetObjectCommand({ Bucket: config.S3_BUCKET!, Key: key })
+  );
+  const bytes = await response.Body?.transformToByteArray();
+  if (!bytes) throw new Error(`Private S3 object is empty: ${key}`);
+  if (bytes.byteLength > MAX_INLINE_MEDIA_BYTES) {
+    throw new Error(
+      `${kind} is too large for the private-media handoff (${Math.ceil(bytes.byteLength / 1024 / 1024)} MB). ` +
+      "Use a clip of five seconds or less."
+    );
+  }
+
+  const filename = key.split("/").pop() || `${kind}.bin`;
+  return {
+    [`${kind}_base64`]: Buffer.from(bytes).toString("base64"),
+    [`${kind}_filename`]: filename,
+  };
+}
+
+/** Launch an asynchronous LTX-2.3 LipDub job. */
 export async function animateLipSync(req: LipSyncRequest): Promise<ModalTask> {
   if (!config.MODAL_LIPSYNC_URL) {
     throw new Error("MODAL_LIPSYNC_URL is not configured in Render.");
   }
-
-  const audioUrl = req.audioUri ?? req.audioUrl;
-  if (!audioUrl) throw new Error("Lip-sync requires an audio URL.");
-
-  const jobId = `sync_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const response = await fetch(config.MODAL_LIPSYNC_URL, {
-    method: "POST",
-    headers: modalHeaders(),
-    body: JSON.stringify({
-      audio_url: audioUrl,
-      video_url: req.videoUrl,
-      avatar_id: req.avatarId,
-      job_id: jobId,
-    }),
-    signal: AbortSignal.timeout(30_000),
-    redirect: "follow",
-  });
-
-  if (!response.ok) {
-    throw new Error(`Modal lip-sync service rejected the request: ${await responseError(response)}`);
+  if (!config.PUBLIC_BASE_URL) {
+    throw new Error("PUBLIC_BASE_URL is required for Modal lip-sync callbacks.");
   }
 
-  return { id: encodeTaskId({ source: "modal", id: jobId }) };
+  const audioUrl = req.audioUri ?? req.audioUrl;
+  const videoUrl = req.videoUrl;
+  if (!audioUrl) throw new Error("Lip-sync requires an audio URL.");
+  if (!videoUrl) throw new Error("Lip-sync requires a performance video URL.");
+
+  const prompt = (req.promptText ?? req.prompt ?? "A performer sings naturally to the supplied vocal performance.").trim();
+  const referenceStrength = Math.min(1.5, Math.max(0, Number(req.referenceStrength ?? 1)));
+  const jobId = `sync_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const now = Date.now();
+
+  await writeJobToDisk(jobId, {
+    status: "pending",
+    prompt,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  try {
+    const [videoMedia, audioMedia] = await Promise.all([
+      modalMediaPayload(videoUrl, "video"),
+      modalMediaPayload(audioUrl, "audio"),
+    ]);
+    const webhookUrl = `${config.PUBLIC_BASE_URL.replace(/\/$/, "")}/api/modal/webhook`;
+
+    const response = await fetch(config.MODAL_LIPSYNC_URL, {
+      method: "POST",
+      headers: modalHeaders(),
+      body: JSON.stringify({
+        ...videoMedia,
+        ...audioMedia,
+        prompt,
+        reference_strength: referenceStrength,
+        audio_start: req.audioStart ?? 0,
+        audio_end: req.audioEnd,
+        avatar_id: req.avatarId,
+        job_id: jobId,
+        webhook_url: webhookUrl,
+      }),
+      signal: AbortSignal.timeout(120_000),
+      redirect: "follow",
+    });
+
+    if (!response.ok) {
+      throw new Error(await responseError(response));
+    }
+
+    const accepted = (await response.json().catch(() => ({}))) as { call_id?: string };
+    await writeJobToDisk(jobId, {
+      status: "running",
+      prompt,
+      createdAt: now,
+      updatedAt: Date.now(),
+      modalCallId: accepted.call_id,
+    });
+    return { id: encodeTaskId({ source: "modal", id: jobId }) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await writeJobToDisk(jobId, {
+      status: "failed",
+      prompt,
+      error: message,
+      createdAt: now,
+      updatedAt: Date.now(),
+    });
+    throw new Error(`Could not start LTX-2.3 LipDub: ${message}`);
+  }
 }
