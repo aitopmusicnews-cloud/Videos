@@ -158,7 +158,7 @@ export function cancelJob(jobId: string): void {
 
   if (job.state === "queued") {
     useStore.getState().setJobs((jobs) =>
-      jobs.map((item) => item.id === jobId
+      jobs.map((item) => jobId === item.id
         ? { ...item, state: "cancelled", completedAt: Date.now() }
         : item),
     );
@@ -310,7 +310,16 @@ async function persistGeneratedClip(clip: Clip, videoUrl: string, sectionLabel: 
       model: "ltx-video",
       generationTaskId: clip.generationTaskId,
     });
-    if (saved.videoUrl && saved.videoUrl !== videoUrl) {
+    // Keep the immediately playable Modal URL in the active timeline. The
+    // server may rehost the file into a private S3 bucket and return a direct
+    // S3 URL; anonymous browser playback of that URL returns 403. Once the
+    // private-media proxy is enabled, same-origin /media or /storage URLs are
+    // safe to adopt.
+    if (
+      saved.videoUrl &&
+      saved.videoUrl !== videoUrl &&
+      (saved.videoUrl.startsWith("/media/") || saved.videoUrl.startsWith("/storage/"))
+    ) {
       useStore.getState().updateClip(clip.id, { videoUrl: saved.videoUrl });
     }
   } catch (error) {
