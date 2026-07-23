@@ -194,6 +194,11 @@ export const LipSyncRequest = z.object({
   videoUrl: z.string().optional(),
   avatarId: z.string().optional(),
   model: z.string().optional(),
+  prompt: z.string().optional(),
+  promptText: z.string().optional(),
+  referenceStrength: z.number().min(0).max(1.5).optional(),
+  audioStart: z.number().min(0).optional(),
+  audioEnd: z.number().positive().optional(),
 }).passthrough();
 export type LipSyncRequest = z.infer<typeof LipSyncRequest>;
 
