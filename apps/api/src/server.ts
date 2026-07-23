@@ -5,7 +5,7 @@ import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { z } from "zod";
 import { dirname, join, resolve } from "node:path";
-import { existsSync, appendFileSync, statSync } from "node:fs";
+import { existsSync, appendFileSync, statSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import {
@@ -23,6 +23,7 @@ import {
   generateCharacterFrame,
   readJobFromDisk,
   writeJobToDisk,
+  decodeTaskId,
 } from "./modalAI.js";
 import { submitRender, getRenderJob } from "./render_queue.js";
 import { FfmpegError } from "./ffmpeg.js";
@@ -79,8 +80,12 @@ await app.register(cors, {
 });
 await app.register(rateLimit, { max: 200, timeWindow: "1 minute" });
 await app.register(multipart, { limits: { fileSize: 100 * 1024 * 1024 } });
+const storageRootDir = resolve(join(process.cwd(), config.STORAGE_DIR));
+if (!existsSync(storageRootDir)) {
+  try { mkdirSync(storageRootDir, { recursive: true }); } catch (_) {}
+}
 await app.register(fastifyStatic, {
-  root: join(process.cwd(), config.STORAGE_DIR),
+  root: storageRootDir,
   prefix: "/storage/",
   decorateReply: false,
 });
@@ -91,6 +96,8 @@ const __dirname = dirname(__filename);
 let webDistResolved: string | null = null;
 const possibleDirs = [
   config.WEB_DIST_DIR,
+  resolve(join(process.cwd(), "dist")),
+  "dist",
   resolve(join(__dirname, "..", "..", "web", "dist")),
   resolve(join(__dirname, "..", "web")),
   resolve(join(__dirname, "..", "web", "dist")),
@@ -505,11 +512,37 @@ app.post("/api/avatars", async (req, reply) => {
 app.get("/api/tasks/:id", async (req, reply) => {
   try {
     const { id } = req.params as { id: string };
-    const job = await readJobFromDisk(id);
+    const decoded = decodeTaskId(id);
+    const lookupId = decoded.id || id;
+
+    let job = await readJobFromDisk(lookupId);
+    if (!job && lookupId !== id) {
+      job = await readJobFromDisk(id);
+    }
+
     if (!job) {
       return reply.code(404).send({ error: "Task or job record not found" });
     }
-    return reply.send(job);
+
+    const rawStatus = (job.status || "").toLowerCase();
+    const isCompleted = rawStatus === "completed" || rawStatus === "succeeded";
+    const isFailed = rawStatus === "failed";
+    const mappedStatus = isCompleted ? "SUCCEEDED" : isFailed ? "FAILED" : "pending";
+
+    const videoUrl = job.video_url;
+    const outputList = videoUrl ? [videoUrl] : [];
+
+    return reply.send({
+      id,
+      status: mappedStatus,
+      rawStatus: job.status,
+      video_url: videoUrl,
+      outputUrl: videoUrl,
+      output: outputList,
+      error: job.error,
+      prompt: job.prompt,
+      createdAt: job.createdAt,
+    });
   } catch (error: any) {
     return reply.code(500).send({ error: error.message });
   }
@@ -736,6 +769,9 @@ app.delete("/api/library/folders/:id", async (req, reply) => {
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : config.PORT;
+app.listen({ port, host: "0.0.0.0" }).then(() => {
+  app.log.info(`api listening on port ${port}`);
+});
 app.listen({ port, host: "0.0.0.0" }).then(() => {
   app.log.info(`api listening on port ${port}`);
 });
