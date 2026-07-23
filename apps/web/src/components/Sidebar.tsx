@@ -13,22 +13,6 @@ const SOURCES: Array<{ value: Clip["source"]; label: string; desc: string }> = [
   { value: "generated", label: "Text-to-Image ──> Video", desc: "Generate seed frame using SDXL ──> animate with LTX-Video" },
   { value: "lipSync", label: "Character Lip Sync Studio", desc: "Animate avatar mouth synced to vocal stems on Modal" },
   { value: "continue", label: "Continue from previous clip", desc: "Seamless generation utilizing the last frame of the previous clip" },
-  { value: "archetype", label: "Lookbook Archetype Seed", desc: "Pick a lookbook image or custom image seed for this clip" },
-  { value: "library", label: "Apply from Media Library", desc: "Choose a previously saved video clip from your library" },
-  { value: "aleph", label: "Video-to-Video Restyle", desc: "Restyle an existing video clip using a text prompt" },
-];
-
-const MOTION_PRESETS = [
-  { label: "Dolly In", text: "slow dolly-in, pushing towards subject, 35mm film lens" },
-  { label: "Orbit Pan", text: "smooth 360 orbital tracking shot, cinematic studio lighting" },
-  { label: "Zolly Zoom", text: "dramatic dolly zoom zolly effect, background expands while subject locked" },
-  { label: "Crane Up", text: "dramatic crane up, rising vertical camera angle" },
-  { label: "Drone Sweep", text: "wide cinematic drone sweep, atmospheric haze" },
-  { label: "Low Angle", text: "low-angle tracking shot looking up, heroic perspective" },
-  { label: "Macro Lock", text: "locked-in extreme macro close-up, sharp depth of field" },
-  { label: "Whip Pan", text: "fast whip-pan motion cut, high-contrast strobe pulse" },
-  { label: "Spotlight", text: "overhead vertical spotlight, high-contrast shadow drama" },
-  { label: "Handheld", text: "jittery energetic handheld camera movement, high bounce" },
 ];
 
 // CLEANED: Only lists the actual LTX engine running on your Modal A100 GPU
@@ -84,32 +68,12 @@ export function Sidebar() {
   const setModel = (model: GenerationModel) => updateClip(clip.id, { model });
   const setPrompt = (value: string) => updateClip(clip.id, { prompt: value });
   const setImagePrompt = (value: string) => updateClip(clip.id, { imagePrompt: value });
-  const cameraPrompt = (clip as any).cameraPrompt ?? "";
-  const setCameraPrompt = (value: string) => {
-    const patch: any = { cameraPrompt: value };
-    updateClip(clip.id, patch);
-  };
   const setBridge = (on: boolean) => updateClip(clip.id, { bridge: on });
+  
+  // FIXED: Variable isolated out-of-line as 'any' to eliminate error TS2353 during setAudio updates
   const setAudio = (on: boolean) => {
     const patch: any = { enableAudio: on };
     updateClip(clip.id, patch);
-  };
-  
-  const addLookbook = useStore((s) => s.addLookbook);
-  const [extracting, setExtracting] = useState(false);
-
-  const onExtractFrame = async () => {
-    if (!clip?.videoUrl) return;
-    setExtracting(true);
-    try {
-      const frameUrl = await extractLastFrame(clip.videoUrl);
-      addLookbook(frameUrl);
-      toast.success("Frame extracted & added to Lookbook");
-    } catch (err) {
-      toast.error("Could not extract frame from video");
-    } finally {
-      setExtracting(false);
-    }
   };
 
   const canBridge =
@@ -142,8 +106,6 @@ export function Sidebar() {
           ? clip.archetypeUrl ?? lookbook[0] ?? ""
           : characterImage ?? "";
           
-    const combinedPrompt = [prompt, cameraPrompt].filter(Boolean).join(", camera motion: ");
-
     // FIXED: Variable isolated out-of-line as 'any' to eliminate error TS2353 during scheduler enqueueing
     const generationPayload: any = {
       clipId: clip.id,
@@ -154,7 +116,7 @@ export function Sidebar() {
       avatarId: clip.source === "lipSync" ? avatarId ?? undefined : undefined,
       clipStart: clip.source === "lipSync" ? clip.start : undefined,
       clipEnd: clip.source === "lipSync" ? clip.end : undefined,
-      prompt: combinedPrompt,
+      prompt,
       imagePrompt: clip.source === "generated" ? imagePrompt : undefined,
       duration: durationSec,
       sectionLabel,
@@ -234,58 +196,6 @@ export function Sidebar() {
         </div>
       )}
 
-      {/* Camera & Motion Directions Input & Presets */}
-      {!isLibrarySource && (
-        <div className="option-group">
-          <div className="label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Camera & Motion Directions</span>
-            <span className="dim" style={{ fontSize: "11px" }}>Angle, Lens & Movement</span>
-          </div>
-          <textarea
-            className="prompt"
-            style={{ minHeight: "52px" }}
-            placeholder="e.g. slow 360 orbital tracking shot, 35mm lens, high-contrast strobe pulse..."
-            value={cameraPrompt}
-            onChange={(e) => setCameraPrompt(e.target.value)}
-          />
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "5px", marginTop: "6px" }}>
-            {MOTION_PRESETS.map((p) => (
-              <button
-                key={p.label}
-                type="button"
-                className="model-chip"
-                style={{ fontSize: "11px", padding: "3px 8px" }}
-                onClick={() => {
-                  if (!cameraPrompt) {
-                    setCameraPrompt(p.text);
-                  } else if (!cameraPrompt.includes(p.text)) {
-                    setCameraPrompt(`${cameraPrompt}, ${p.text}`);
-                  }
-                }}
-                title={`Add '${p.text}' to Camera & Motion Directions`}
-              >
-                + {p.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Extract Last Frame Action */}
-      {clip.status === "ready" && clip.videoUrl && (
-        <div className="option-group">
-          <button
-            type="button"
-            className="btn ghost"
-            style={{ width: "100%", justifyContent: "center", border: "1px border var(--border)" }}
-            onClick={onExtractFrame}
-            disabled={extracting}
-          >
-            {extracting ? "Extracting frame…" : "📷 Save Frame to Lookbook"}
-          </button>
-        </div>
-      )}
-
       <div className="option-group">
         <div className="label">Audio context (auto)</div>
         <div className="context-card">
@@ -361,8 +271,7 @@ export function Sidebar() {
   );
 }
 
-type CanGenerate = { ok: true; reason?: string } | { ok: false; reason: string };
-
+type CanGenerate = { ok: true } | { ok: false; reason: string };
 
 function checkCanGenerate(
   clip: Clip,
@@ -667,29 +576,6 @@ function avgRms(curve: number[], start: number, end: number, duration: number): 
   for (let i = i0; i < i1; i++) s += curve[i] ?? 0;
   return s / (i1 - i0);
 }
-
-async function extractLastFrame(videoUrl: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement("video");
-    video.crossOrigin = "anonymous";
-    video.src = videoUrl;
-    video.preload = "auto";
-    video.onloadedmetadata = () => {
-      video.currentTime = Math.max(0.1, video.duration - 0.2);
-    };
-    video.onseeked = () => {
-      try {
-        const canvas = document.createElement("canvas");
-        canvas.width = video.videoWidth || 768;
-        canvas.height = video.videoHeight || 512;
-        const ctx = canvas.getContext("2d");
-        ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL("image/png");
-        resolve(dataUrl);
-      } catch (e) {
-        reject(e);
-      }
-    };
     video.onerror = (e) => reject(e);
   });
 }
