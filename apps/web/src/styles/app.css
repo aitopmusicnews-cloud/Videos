@@ -1223,3 +1223,38 @@ body.dragging-resize .resize-handle { background: rgba(255, 107, 0, 0.6); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid var(--surface); }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* LTX-2.3 focused generation controls */
+.ltx-engine-card {
+  margin-bottom: var(--sp-4);
+  padding: 10px 12px;
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--r-3);
+  background: var(--accent-soft);
+}
+.ltx-engine-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.ltx-engine-meta { margin-top: 3px; font-size: 10px; line-height: 1.45; color: var(--text-dim); }
+.rail-help {
+  margin: -2px 0 10px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.prompt.compact { min-height: 54px; }
+.motion-presets { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.motion-presets .model-chip { font-size: 10px; padding: 4px 7px; }
+.continuity-status {
+  display: grid;
+  gap: 3px;
+  margin-bottom: var(--sp-4);
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.continuity-status strong { color: var(--text); font-size: 11px; }
+.continuity-status span { color: var(--text-dim); }
+.continuity-status.ready { border-color: rgba(61, 220, 132, 0.35); background: rgba(61, 220, 132, 0.06); }
+.continuity-status.blocked { border-color: rgba(255, 178, 74, 0.35); background: rgba(255, 178, 74, 0.06); }
+.w-full { width: 100%; justify-content: center; }

@@ -61,32 +61,3 @@ export async function listClips(): Promise<SavedClip[]> {
 export async function deleteClip(id: string): Promise<boolean> {
   return storage.deleteJson(clipMetaKey(id));
 }
-
-/**
- * NEW: LTX-Video generator function.
- * This sends a fetch request to your Modal cloud instance with your prompt and duration,
- * then returns the direct video stream URL.
- */
-export async function generateLTXVideo(prompt: string, duration: number): Promise<string> {
-  // Pulls the Modal URL you saved in Render's dashboard environment variables
-  const modalUrl = process.env.MODAL_LTX_URL;
-  if (!modalUrl) {
-    throw new Error("Missing MODAL_LTX_URL environment variable! Please configure it in your Render settings.");
-  }
-
-  const response = await fetch(modalUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      prompt: prompt,
-      duration: duration
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Modal LTX-Video inference failed: ${await response.text()}`);
-  }
-
-  const data = (await response.json()) as { video_url: string };
-  return data.video_url;
-}

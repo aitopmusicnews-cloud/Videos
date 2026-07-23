@@ -142,10 +142,19 @@ export interface RenderEntry {
 
 export interface Task {
   id: string;
-  status: "pending" | "running" | "succeeded" | "failed" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+  status:
+    | "pending"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "PENDING"
+    | "RUNNING"
+    | "SUCCEEDED"
+    | "FAILED"
+    | "CANCELLED";
   progress?: number;
   outputUrl?: string;
-  output?: { videoUrl?: string; imageUrl?: string; url?: string };
+  output?: string[] | { videoUrl?: string; imageUrl?: string; url?: string };
   error?: string;
 }
 
@@ -161,8 +170,11 @@ export const ImageToVideoRequest = z.object({
   prompt: z.string().optional(),
   promptText: z.string().optional(),
   imageUrl: z.string().optional(),
+  promptImage: z.string().optional(),
+  promptImageEnd: z.string().optional(),
   duration: z.number().optional(),
   model: z.string().optional(),
+  ratio: z.string().optional(),
   aspectRatio: z.string().optional(),
 }).passthrough();
 export type ImageToVideoRequest = z.infer<typeof ImageToVideoRequest>;
@@ -178,6 +190,8 @@ export type VideoToVideoRequest = z.infer<typeof VideoToVideoRequest>;
 export const LipSyncRequest = z.object({
   imageUrl: z.string().optional(),
   audioUrl: z.string().optional(),
+  audioUri: z.string().optional(),
+  videoUrl: z.string().optional(),
   avatarId: z.string().optional(),
   model: z.string().optional(),
 }).passthrough();

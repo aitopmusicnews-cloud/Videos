@@ -5,7 +5,7 @@ import { ProjectSnapshot } from "@mvs/shared";
 import type { Job } from "./scheduler.js";
 import { getWs } from "./wavesurfer-ref.js";
 
-export const MAX_CLIP_LEN = 15;
+export const MAX_CLIP_LEN = 5;
 export const MIN_CLIP_LEN = 0.5;
 
 export const ZOOM_MIN = 1;
@@ -46,6 +46,17 @@ function nearestBeatInRange(t: number, beats: number[], lo: number, hi: number):
 
 function newClipId(): string {
   return `clip-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function normalizeLtxClips(clips: Clip[]): Clip[] {
+  return clips.map((clip, index) => {
+    if (clip.status === "ready" && clip.source === "upload") return clip;
+    let source: string;
+    if (clip.source === "imageToVideo" || clip.source === "archetype") source = "imageToVideo";
+    else if (clip.source === "continue" && index > 0) source = "continue";
+    else source = "textToVideo";
+    return { ...clip, source, model: "ltx-video" };
+  });
 }
 
 function subdivideSection(section: AudioSection, beats: number[]): Clip[] {
@@ -206,7 +217,7 @@ export const useStore = create<State>()(
           return;
         }
         const s = result.data;
-        const clips = (s.clips ?? []).map((c) =>
+        const clips = normalizeLtxClips((s.clips ?? []).map((c) =>
           c.status === "queued" || c.status === "generating"
             ? {
                 ...c,
@@ -216,7 +227,7 @@ export const useStore = create<State>()(
                 thumbnailUrl: undefined,
               }
             : c
-        );
+        ));
         set({
           ...emptyState,
           projectId: s.projectId ?? null,
@@ -241,6 +252,7 @@ export const useStore = create<State>()(
 
       loadSong: (songId, audioUrl, analysis, filename) => {
         const clips = analysis.sections.flatMap((s) => subdivideSection(s, analysis.beats));
+        if (clips[0]) clips[0] = { ...clips[0], source: "textToVideo", model: "ltx-video" };
         set({
           projectId: get().projectId ?? `proj-${crypto.randomUUID().slice(0, 8)}`,
           songId,
@@ -355,6 +367,7 @@ export const useStore = create<State>()(
           ...target,
           id: newClipId(),
           start: at,
+          source: wasReady ? "continue" : target.source,
           status: wasReady ? "empty" : target.status,
           videoUrl: wasReady ? undefined : target.videoUrl,
           thumbnailUrl: wasReady ? undefined : target.thumbnailUrl,
@@ -481,7 +494,7 @@ export const useStore = create<State>()(
           return current;
         }
         const ps = result.data;
-        const clips = (ps.clips ?? []).map((c) =>
+        const clips = normalizeLtxClips((ps.clips ?? []).map((c) =>
           c.status === "queued"
             ? {
                 ...c,
@@ -491,7 +504,7 @@ export const useStore = create<State>()(
                 thumbnailUrl: undefined,
               }
             : c
-        );
+        ));
         return { ...current, ...ps, clips };
       },
     }

@@ -23,6 +23,7 @@ import {
   generateCharacterFrame,
   readJobFromDisk,
   writeJobToDisk,
+  decodeTaskId,
 } from "./modalAI.js";
 import { submitRender, getRenderJob } from "./render_queue.js";
 import { FfmpegError } from "./ffmpeg.js";
@@ -30,7 +31,7 @@ import { extractLastFrame } from "./frames.js";
 import { sliceAudio } from "./audio_slice.js";
 import { analyzeVocalTrack } from "./vocal.js";
 import { saveProject, listProjects, loadProject, deleteProject, listRenders } from "./projects.js";
-import { saveClip, listClips, deleteClip, generateLTXVideo } from "./clips.js";
+import { saveClip, listClips, deleteClip } from "./clips.js";
 import { saveImage, listImages, deleteImage } from "./images.js";
 import { saveFolder, listFolders, deleteFolder } from "./folders.js";
 import {
@@ -51,12 +52,14 @@ const urlOrPath = z.string().min(1);
 
 const app = Fastify({
   logger: { level: "info" },
+  trustProxy: true,
   bodyLimit: 100 * 1024 * 1024,
   ignoreTrailingSlash: true,
   maxParamLength: 500,
 });
 
 const webOrigins = config.WEB_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean);
+if (config.PUBLIC_BASE_URL) webOrigins.push(config.PUBLIC_BASE_URL.replace(/\/$/, ""));
 await app.register(cors, {
   origin: (origin, cb) => {
     if (!origin) {
@@ -69,7 +72,8 @@ await app.register(cors, {
     }
     const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
     const isCloudRun = /^https?:\/\/.*\.run\.app$/.test(origin);
-    if (isLocalhost || isCloudRun) {
+    const isRender = /^https?:\/\/.*\.onrender\.com$/.test(origin);
+    if (isLocalhost || isCloudRun || isRender) {
       cb(null, true);
       return;
     }
@@ -77,6 +81,20 @@ await app.register(cors, {
   },
   credentials: true,
 });
+
+function requestPublicBaseUrl(req: { headers: Record<string, unknown>; protocol?: string }): string {
+  if (config.PUBLIC_BASE_URL) return config.PUBLIC_BASE_URL.replace(/\/$/, "");
+
+  const forwardedProto = String(req.headers["x-forwarded-proto"] ?? "")
+    .split(",")[0]
+    ?.trim();
+  const forwardedHost = String(req.headers["x-forwarded-host"] ?? "")
+    .split(",")[0]
+    ?.trim();
+  const host = forwardedHost || String(req.headers.host ?? "localhost:3001");
+  const protocol = forwardedProto || req.protocol || "http";
+  return `${protocol}://${host}`;
+}
 await app.register(rateLimit, { max: 200, timeWindow: "1 minute" });
 await app.register(multipart, { limits: { fileSize: 100 * 1024 * 1024 } });
 await app.register(fastifyStatic, {
@@ -178,9 +196,9 @@ app.setNotFoundHandler((req, reply) => {
 });
 
 app.addHook("preHandler", async (req, reply) => {
-  const authToken = (config as any).API_AUTH_TOKEN;
+  const authToken = config.API_AUTH_TOKEN;
   if (authToken && req.url.startsWith("/api/")) {
-    if (req.url === "/api/openrouter/webhook") {
+    if (req.url === "/api/modal/webhook" || req.url === "/api/openrouter/webhook") {
       return;
     }
     const authHeader = req.headers.authorization;
@@ -394,14 +412,24 @@ app.get("/api/songs/:id/analysis", async (req, reply) => {
 // Generation primitives ------------------------------------------------
 
 app.post("/api/generate/image-to-video", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (req, reply) => {
-  return reply.send(await imageToVideo(ImageToVideoRequest.parse(req.body)));
+  return reply.code(202).send(
+    await imageToVideo(ImageToVideoRequest.parse(req.body), requestPublicBaseUrl(req as any))
+  );
 });
 
 app.post("/api/generate/video-to-video", async (req, reply) => {
   try {
-    // FIXED: Redirects the legacy video-to-video track into your active Modal LTX pipeline
-    const result = await imageToVideo(req.body as any);
-    return reply.send(result);
+    const body = VideoToVideoRequest.parse(req.body);
+    const result = await imageToVideo(
+      {
+        prompt: body.prompt,
+        promptText: (body as any).promptText ?? body.prompt,
+        model: body.model,
+        duration: (body as any).duration,
+      },
+      requestPublicBaseUrl(req as any),
+    );
+    return reply.code(202).send(result);
   } catch (error: any) {
     return reply.code(500).send({ error: error.message });
   }
@@ -416,8 +444,10 @@ app.post("/api/generate/text-to-image", { config: { rateLimit: { max: 10, timeWi
 });
 
 app.post("/api/generate/text-to-video", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (req, reply) => {
-  // FIXED: Routes the request to imageToVideo instead of the missing function
-  return reply.send(await imageToVideo(req.body as any));
+  const body = TextToVideoRequest.parse(req.body);
+  return reply.code(202).send(
+    await imageToVideo(body, requestPublicBaseUrl(req as any))
+  );
 });
 
 // Fastify Webhook Handler Endpoint used by serverless GPU callbacks
@@ -428,7 +458,7 @@ const WebhookBody = z.object({
   error: z.string().optional().nullable(),
 });
 
-app.post("/api/openrouter/webhook", async (req, reply) => {
+const modalWebhookHandler = async (req: any, reply: any) => {
   const body = WebhookBody.parse(req.body);
   const { status, job_id, video_url, error } = body;
 
@@ -445,20 +475,26 @@ app.post("/api/openrouter/webhook", async (req, reply) => {
     await writeJobToDisk(job_id, {
       ...existingJob,
       status: "completed",
-      video_url: video_url
+      video_url: video_url,
+      updatedAt: Date.now(),
     });
     app.log.info(`[Webhook Success] Resolved Job ID ${job_id} persistently on disk.`);
   } else {
     await writeJobToDisk(job_id, {
       ...existingJob,
       status: "failed",
-      error: error || "Inference failed on GPU cluster."
+      error: error || "Inference failed on GPU cluster.",
+      updatedAt: Date.now(),
     });
     app.log.error(`[Webhook Failure] Job ID ${job_id} marked as failed: ${error}`);
   }
 
   return reply.send({ success: true });
-});
+};
+
+app.post("/api/modal/webhook", modalWebhookHandler);
+// Keep the old callback path working for jobs submitted before this repair.
+app.post("/api/openrouter/webhook", modalWebhookHandler);
 
 app.post("/api/generate/ltx-video", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (req, reply) => {
   const body = z.object({
@@ -467,12 +503,11 @@ app.post("/api/generate/ltx-video", { config: { rateLimit: { max: 10, timeWindow
   }).parse(req.body);
 
   try {
-    const videoUrl = await generateLTXVideo(body.prompt, body.duration);
-    return reply.send({ 
-      id: `ltx-${Date.now()}`, 
-      status: "completed", 
-      output: [videoUrl] 
-    });
+    const task = await imageToVideo(
+      { promptText: body.prompt, duration: body.duration, model: "ltx-video" },
+      requestPublicBaseUrl(req as any),
+    );
+    return reply.code(202).send(task);
   } catch (error: any) {
     req.log.error(error, "Modal LTX generation failed");
     return reply.code(500).send({ error: error.message });
@@ -487,41 +522,14 @@ const CreateAvatarBody = z.object({
 });
 
 app.get("/api/avatars", async (req, reply) => {
+  // FIXED: Returns a clean empty array instead of calling the missing function
   return reply.send([]);
 });
 
-app.post("/api/avatars/create", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (req, reply) => {
-  const body = CreateAvatarBody.parse(req.body);
+app.post("/api/avatars", async (req, reply) => {
   try {
-    const result = await generateCharacterFrame({
-      model: "gen4_image",
-      promptText: `Generate a character avatar from: ${body.name}`,
-      ratio: "1:1",
-    } as any);
-    return reply.send({
-      avatarId: result.id,
-      status: "READY",
-      failureReason: undefined,
-    });
-  } catch (error: any) {
-    return reply.code(500).send({ error: error.message });
-  }
-});
-
-app.get("/api/avatars/:id", async (req, reply) => {
-  const params = z.object({ id: SafeId }).parse(req.params);
-  try {
-    const job = await readJobFromDisk(params.id);
-    if (!job) {
-      return reply.code(404).send({ error: "Avatar not found" });
-    }
-    return reply.send({
-      id: params.id,
-      name: "Avatar",
-      status: job.status === "completed" ? "READY" : "PROCESSING",
-      imageUri: job.status === "completed" ? job.video_url : undefined,
-      createdAt: Date.now(),
-    });
+    const result = await generateCharacterFrame(req.body as any);
+    return reply.send(result);
   } catch (error: any) {
     return reply.code(500).send({ error: error.message });
   }
@@ -531,18 +539,42 @@ app.get("/api/avatars/:id", async (req, reply) => {
 
 app.get("/api/tasks/:id", async (req, reply) => {
   try {
-    const { id } = req.params as { id: string };
+    const { id: encodedId } = req.params as { id: string };
+    const { id } = decodeTaskId(encodedId);
     const job = await readJobFromDisk(id);
     if (!job) {
       return reply.code(404).send({ error: "Task or job record not found" });
     }
-    return reply.send(job);
+
+    if (job.status === "completed" && job.video_url) {
+      return reply.send({
+        id: encodedId,
+        status: "SUCCEEDED",
+        progress: 100,
+        outputUrl: job.video_url,
+        output: [job.video_url],
+      });
+    }
+    if (job.status === "failed") {
+      return reply.send({
+        id: encodedId,
+        status: "FAILED",
+        error: job.error ?? "Video generation failed.",
+      });
+    }
+
+    return reply.send({
+      id: encodedId,
+      status: job.status === "running" ? "RUNNING" : "PENDING",
+      progress: job.status === "running" ? 10 : 0,
+    });
   } catch (error: any) {
     return reply.code(500).send({ error: error.message });
   }
 });
 
 app.delete("/api/tasks/:id", async (req, reply) => {
+  // FIXED: Returns a clean success message instead of calling the missing function
   return reply.send({ success: true, message: "Task references cleared from workspace." });
 });
 
@@ -580,7 +612,7 @@ const VocalStemBody = z.object({
   audioUrl: urlOrPath,
 });
 
-app.post("/api/audio/vocal-stem", async (req, reply) => {
+app.post("/api/songs/vocal-stem", async (req, reply) => {
   const body = VocalStemBody.parse(req.body);
   const result = await analyzeVocalTrack(body.audioUrl);
   return reply.send(result);
@@ -616,31 +648,14 @@ const RenderBody = z
     message: "clip extends past project duration",
   });
 
-app.post("/api/renders/submit", { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } }, async (req, reply) => {
-  const body = RenderBody.parse(req.body);
-  const job = submitRender(body);
-  return reply.send({
-    renderId: job.id,
-    state: job.state,
-    queuePosition: job.queuePosition,
-  });
-});
-
 app.post("/api/render", { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } }, async (req, reply) => {
   const body = RenderBody.parse(req.body);
-  const job = submitRender(body);
+  const job = submitRender(body as any);
   return reply.send({
     renderId: job.id,
     state: job.state,
     queuePosition: job.queuePosition,
   });
-});
-
-app.get("/api/renders/:renderId", async (req, reply) => {
-  const params = z.object({ renderId: SafeId }).parse(req.params);
-  const job = getRenderJob(params.renderId);
-  if (!job) return reply.code(404).send({ error: "render job not found" });
-  return reply.send(job);
 });
 
 app.get("/api/render/jobs/:renderId", async (req, reply) => {
@@ -656,23 +671,16 @@ const SaveProjectBody = z.object({
   id: SafeId,
   name: z.string().min(1).max(200),
   state: z.record(z.unknown()),
-  thumbnailUrl: z.string().optional(),
 });
 
 app.get("/api/projects", async (_req, reply) => {
   const projects = await listProjects();
-  return reply.send(projects);
-});
-
-app.post("/api/projects", async (req, reply) => {
-  const body = SaveProjectBody.parse(req.body);
-  const meta = await saveProject(body.id, body.name, body.state, body.thumbnailUrl);
-  return reply.send(meta);
+  return reply.send({ projects });
 });
 
 app.post("/api/projects/save", async (req, reply) => {
   const body = SaveProjectBody.parse(req.body);
-  const meta = await saveProject(body.id, body.name, body.state, body.thumbnailUrl);
+  const meta = await saveProject(body.id, body.name, body.state);
   return reply.send(meta);
 });
 
@@ -690,11 +698,6 @@ app.delete("/api/projects/:id", async (req, reply) => {
   return reply.send({ ok: true });
 });
 
-app.get("/api/renders", async (_req, reply) => {
-  const renders = await listRenders();
-  return reply.send(renders);
-});
-
 app.get("/api/library/renders", async (_req, reply) => {
   const renders = await listRenders();
   return reply.send({ renders });
@@ -710,7 +713,6 @@ const SaveClipBody = z.object({
   prompt: z.string().nullable(),
   duration: z.number().positive(),
   sectionLabel: z.string().nullable(),
-  savedAt: z.string().optional(),
   folderId: z.string().nullable().optional(),
   model: z.string().nullable().optional(),
   generationTaskId: z.string().nullable().optional(),
@@ -718,18 +720,12 @@ const SaveClipBody = z.object({
 
 app.get("/api/clips", async (_req, reply) => {
   const clips = await listClips();
-  return reply.send(clips);
-});
-
-app.post("/api/clips", async (req, reply) => {
-  const body = SaveClipBody.parse(req.body);
-  const saved = await saveClip(body);
-  return reply.send(saved);
+  return reply.send({ clips });
 });
 
 app.post("/api/clips/save", async (req, reply) => {
   const body = SaveClipBody.parse(req.body);
-  const saved = await saveClip(body);
+  const saved = await saveClip(body as any);
   return reply.send(saved);
 });
 
@@ -749,25 +745,7 @@ const SaveImageBody = z.object({
   source: z.string(),
   prompt: z.string().nullable(),
   model: z.string().nullable(),
-  savedAt: z.string().optional(),
   folderId: z.string().nullable().optional(),
-});
-
-app.get("/api/images/library", async (_req, reply) => {
-  const images = await listImages();
-  return reply.send(images);
-});
-
-app.post("/api/images/library", async (req, reply) => {
-  const body = SaveImageBody.parse(req.body);
-  const saved = await saveImage(body);
-  return reply.send(saved);
-});
-
-app.post("/api/library/images/save", async (req, reply) => {
-  const body = SaveImageBody.parse(req.body);
-  const saved = await saveImage(body);
-  return reply.send(saved);
 });
 
 app.get("/api/library/images", async (_req, reply) => {
@@ -775,11 +753,10 @@ app.get("/api/library/images", async (_req, reply) => {
   return reply.send({ images });
 });
 
-app.delete("/api/images/library/:id", async (req, reply) => {
-  const params = z.object({ id: SafeId }).parse(req.params);
-  const deleted = await deleteImage(params.id);
-  if (!deleted) return reply.code(404).send({ error: "not found" });
-  return reply.send({ ok: true });
+app.post("/api/library/images/save", async (req, reply) => {
+  const body = SaveImageBody.parse(req.body);
+  const saved = await saveImage(body as any);
+  return reply.send(saved);
 });
 
 app.delete("/api/library/images/:id", async (req, reply) => {
@@ -796,23 +773,16 @@ const SaveFolderBody = z.object({
   name: z.string().min(1).max(200),
   parentId: z.string().nullable(),
   type: z.enum(["clips", "images"]),
-  createdAt: z.string().optional(),
 });
 
 app.get("/api/library/folders", async (_req, reply) => {
   const folders = await listFolders();
-  return reply.send(folders);
-});
-
-app.post("/api/library/folders", async (req, reply) => {
-  const body = SaveFolderBody.parse(req.body);
-  const saved = await saveFolder(body);
-  return reply.send(saved);
+  return reply.send({ folders });
 });
 
 app.post("/api/library/folders/save", async (req, reply) => {
   const body = SaveFolderBody.parse(req.body);
-  const saved = await saveFolder(body);
+  const saved = await saveFolder(body as any);
   return reply.send(saved);
 });
 

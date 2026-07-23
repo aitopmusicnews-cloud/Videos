@@ -1,33 +1,46 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore, MAX_CLIP_LEN } from "../lib/store.js";
-import type { Clip, GenerationModel } from "@mvs/shared";
+import type { Clip } from "@mvs/shared";
 import { enqueueGeneration } from "../lib/scheduler.js";
-import { listSavedClips, type SavedClip } from "../lib/api.js";
-import { getErrorMessage, modelSupportsBridge } from "@mvs/shared";
+import { extractLastFrame } from "../lib/api.js";
 import { AssetUploader } from "./AssetUploader.js";
 import { toast } from "../lib/toast.js";
 
-// UPDATED: Creative pathways customized to match your backend Modal suite and LTX configs
-const SOURCES: Array<{ value: Clip["source"]; label: string; desc: string }> = [
-  { value: "textToVideo", label: "Text-to-Video (LTX-Video)", desc: "Prompt ──> Video directly using LTX on Modal GPU" },
-  { value: "generated", label: "Text-to-Image ──> Video", desc: "Generate seed frame using SDXL ──> animate with LTX-Video" },
-  { value: "lipSync", label: "Character Lip Sync Studio", desc: "Animate avatar mouth synced to vocal stems on Modal" },
-  { value: "continue", label: "Continue from previous clip", desc: "Seamless generation utilizing the last frame of the previous clip" },
+type LtxSource = "textToVideo" | "imageToVideo" | "continue";
+
+const SOURCES: Array<{ value: LtxSource; label: string; desc: string }> = [
+  {
+    value: "textToVideo",
+    label: "Text → Video",
+    desc: "Create synchronized video and audio directly from one scene prompt.",
+  },
+  {
+    value: "imageToVideo",
+    label: "Image → Video",
+    desc: "Animate a reference frame while LTX-2.3 generates matching motion and audio.",
+  },
+  {
+    value: "continue",
+    label: "Continue Previous Clip",
+    desc: "Use the previous clip's last frame as the first frame of this generation.",
+  },
 ];
 
-// CLEANED: Only lists the actual LTX engine running on your Modal A100 GPU
-const IMAGE_TO_VIDEO_MODELS: Array<{ value: any; label: string; desc: string }> = [
-  { value: "ltx-video", label: "⚡ LTX Video (Modal Cloud)", desc: "High-motion native generation · 768x512 · 24fps" },
+const MOTION_PRESETS = [
+  { label: "Dolly In", text: "slow dolly-in toward the subject, 35mm lens" },
+  { label: "Orbit", text: "smooth orbital camera move around the subject" },
+  { label: "Crane Up", text: "camera cranes upward to reveal the environment" },
+  { label: "Drone Sweep", text: "wide cinematic aerial sweep with atmospheric depth" },
+  { label: "Low Angle", text: "low-angle tracking shot with a heroic perspective" },
+  { label: "Macro", text: "extreme macro close-up with shallow depth of field" },
+  { label: "Whip Pan", text: "fast whip-pan transition with energetic motion blur" },
+  { label: "Handheld", text: "natural handheld camera movement with controlled shake" },
 ];
 
-// CLEANED: Matches your text-to-video workflow perfectly
-const TEXT_TO_VIDEO_MODELS: Array<{ value: any; label: string; desc: string }> = [
-  { value: "ltx-video", label: "⚡ LTX Video (Modal Cloud)", desc: "High-motion native generation · 768x512 · 24fps" },
-];
-
-function modelsForSource(source: Clip["source"]): typeof IMAGE_TO_VIDEO_MODELS {
-  // Everything routes to your native Modal LTX engine now
-  return IMAGE_TO_VIDEO_MODELS;
+function normalizeSource(source: string): LtxSource {
+  if (source === "continue") return "continue";
+  if (source === "imageToVideo" || source === "archetype") return "imageToVideo";
+  return "textToVideo";
 }
 
 export function Sidebar() {
@@ -35,14 +48,18 @@ export function Sidebar() {
   const clips = useStore((s) => s.clips);
   const analysis = useStore((s) => s.analysis);
   const lookbook = useStore((s) => s.lookbook);
+  const addLookbook = useStore((s) => s.addLookbook);
   const updateClip = useStore((s) => s.updateClip);
-  const characterImage = useStore((s) => s.characterImageUrl);
-  const avatarId = useStore((s) => s.avatarId);
-  const avatarStatus = useStore((s) => s.avatarStatus);
-  const songId = useStore((s) => s.songId);
-  const audioUrl = useStore((s) => s.audioUrl);
 
+  const [extracting, setExtracting] = useState(false);
   const clip = useMemo(() => clips.find((c) => c.id === selectedId) ?? null, [clips, selectedId]);
+  const source = normalizeSource(clip?.source ?? "textToVideo");
+
+  useEffect(() => {
+    if (clip && clip.source !== source && clip.status !== "ready") {
+      updateClip(clip.id, { source, model: "ltx-video" });
+    }
+  }, [clip?.id, clip?.source, clip?.status, source, updateClip]);
 
   if (!clip || !analysis) return null;
 
@@ -51,46 +68,23 @@ export function Sidebar() {
   const durationSec = clip.end - clip.start;
   const energy = avgRms(analysis.rmsCurve, clip.start, clip.end, analysis.duration);
   const prompt = clip.prompt ?? "";
-  const imagePrompt = clip.imagePrompt ?? "";
+  const cameraPrompt = (clip as Clip & { cameraPrompt?: string }).cameraPrompt ?? "";
 
   const clipIdx = clips.findIndex((c) => c.id === clip.id);
   const hasPrev = clipIdx > 0 && clips[clipIdx - 1]?.status === "ready";
-  const hasNext = clipIdx >= 0 && clipIdx < clips.length - 1 && clips[clipIdx + 1]?.status === "ready";
+  const selectedImage = clip.archetypeUrl ?? lookbook[0];
 
-  const effectiveModel =
-    clip.model ?? (clip.source === "continue" ? "ltx-video" : "ltx-video");
-  const showModelPicker =
-    clip.source !== "lipSync" &&
-    clip.source !== "library";
-  const isLibrarySource = clip.source === "library";
-
-  const setSource = (source: Clip["source"]) => updateClip(clip.id, { source });
-  const setModel = (model: GenerationModel) => updateClip(clip.id, { model });
-  const setPrompt = (value: string) => updateClip(clip.id, { prompt: value });
-  const setImagePrompt = (value: string) => updateClip(clip.id, { imagePrompt: value });
-  const setBridge = (on: boolean) => updateClip(clip.id, { bridge: on });
-  
-  // FIXED: Variable isolated out-of-line as 'any' to eliminate error TS2353 during setAudio updates
-  const setAudio = (on: boolean) => {
-    const patch: any = { enableAudio: on };
-    updateClip(clip.id, patch);
+  const setSource = (next: LtxSource) => {
+    updateClip(clip.id, {
+      source: next,
+      model: "ltx-video",
+      lastError: undefined,
+    });
   };
 
-  const canBridge =
-    clip.source === "continue" &&
-    hasPrev &&
-    hasNext &&
-    modelSupportsBridge(effectiveModel);
-
-  const canGenerate = checkCanGenerate(clip, {
+  const canGenerate = checkCanGenerate(source, {
     prompt,
-    imagePrompt,
-    avatarId,
-    avatarStatus,
-    songId,
-    audioUrl,
-    lookbook,
-    characterImage,
+    selectedImage,
     hasPrev,
   });
 
@@ -99,160 +93,193 @@ export function Sidebar() {
       toast.warning(canGenerate.reason);
       return;
     }
-    const seed =
-      clip.source === "generated" || clip.source === "textToVideo"
-        ? ""
-        : clip.source === "archetype"
-          ? clip.archetypeUrl ?? lookbook[0] ?? ""
-          : characterImage ?? "";
-          
-    // FIXED: Variable isolated out-of-line as 'any' to eliminate error TS2353 during scheduler enqueueing
-    const generationPayload: any = {
+
+    const fullPrompt = [prompt.trim(), cameraPrompt.trim()]
+      .filter(Boolean)
+      .join(". Camera direction: ");
+
+    enqueueGeneration({
       clipId: clip.id,
-      source: clip.source,
-      seedImageUrl: seed,
-      songId: clip.source === "lipSync" ? songId ?? undefined : undefined,
-      audioUrl: clip.source === "lipSync" ? audioUrl ?? undefined : undefined,
-      avatarId: clip.source === "lipSync" ? avatarId ?? undefined : undefined,
-      clipStart: clip.source === "lipSync" ? clip.start : undefined,
-      clipEnd: clip.source === "lipSync" ? clip.end : undefined,
-      prompt,
-      imagePrompt: clip.source === "generated" ? imagePrompt : undefined,
+      source,
+      seedImageUrl: source === "imageToVideo" ? selectedImage ?? "" : "",
+      prompt: fullPrompt,
       duration: durationSec,
       sectionLabel,
       energy,
-      model: showModelPicker ? effectiveModel : undefined,
-      enableAudio: (clip as any).enableAudio ?? true,
-      referenceImages: clip.source === "generated" ? lookbook.slice(0, 3) : undefined,
-      bridge: canBridge && (clip.bridge ?? false) ? true : undefined,
-    };
-
-    enqueueGeneration(generationPayload);
+      model: "ltx-video",
+    });
   };
+
+  const onExtractFrame = async () => {
+    if (!clip.videoUrl) return;
+    setExtracting(true);
+    try {
+      const { url } = await extractLastFrame(clip.videoUrl);
+      addLookbook(url);
+      toast.success("Last frame added to reference images");
+    } catch {
+      toast.error("Could not extract the last frame");
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  const promptLabel =
+    source === "textToVideo"
+      ? "Scene + audio prompt"
+      : source === "imageToVideo"
+        ? "Motion + audio prompt"
+        : "Continuation + audio prompt";
 
   return (
     <>
       <div className="sidebar-header-row">
-        <span className="pill">{sectionLabel}</span>
+        <span className="pill">LTX-2.3</span>
         <span className="meta">{durationSec.toFixed(1)}s · {clip.id}</span>
       </div>
 
-      <SourcePicker
-        clip={clip}
-        effectiveModel={effectiveModel}
-        showModelPicker={showModelPicker}
-        lookbook={lookbook}
-        canBridge={canBridge}
-        onSourceChange={setSource}
-        onModelChange={setModel}
-        onBridgeChange={setBridge}
-        onAudioChange={setAudio}
-        onUpdateClip={updateClip}
-      />
+      <div className="ltx-engine-card">
+        <div className="ltx-engine-title">LTX-2.3 Distilled</div>
+        <div className="ltx-engine-meta">768×512 · 24 FPS · native synchronized audio · Modal A100</div>
+      </div>
 
-      {isLibrarySource ? (
-        <SavedClipPicker
-          currentVideoUrl={clip.videoUrl}
-          onPick={(saved) =>
-            updateClip(clip.id, {
-              videoUrl: saved.videoUrl,
-              status: "ready",
-              lastError: undefined,
-              generationTaskId: undefined,
-              prompt: saved.prompt ?? undefined,
-            })
-          }
-        />
-      ) : clip.source === "generated" ? (
-        <>
-          <div className="option-group">
-            <div className="label">Image prompt</div>
-            <textarea
-              className="prompt"
-              placeholder="anya in a flooded subway, neon reflections, 35mm film grain…"
-              value={imagePrompt}
-              onChange={(e) => setImagePrompt(e.target.value)}
-            />
-          </div>
-          <div className="option-group">
-            <div className="label">Motion prompt (optional)</div>
-            <textarea
-              className="prompt"
-              placeholder="slow dolly-in, water ripples, hair drifts in the wind…"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-          </div>
-        </>
-      ) : (
+      <div className="option-group">
+        <div className="label">Generation mode</div>
+        <div className="select-wrap">
+          <select
+            className="select"
+            value={source}
+            onChange={(e) => setSource(e.target.value as LtxSource)}
+          >
+            {SOURCES.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <span className="select-chevron">▾</span>
+        </div>
+        <div className="select-desc">{SOURCES.find((item) => item.value === source)?.desc}</div>
+      </div>
+
+      {source === "imageToVideo" && (
         <div className="option-group">
-          <div className="label">Prompt (optional)</div>
-          <textarea
-            className="prompt"
-            placeholder="anya running through neon rain, slow shutter…"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
+          <div className="label">First-frame reference</div>
+          <ImageSeedGrid
+            lookbook={lookbook}
+            selectedUrl={clip.archetypeUrl}
+            onPick={(url) => updateClip(clip.id, { archetypeUrl: url })}
+            onClear={() => updateClip(clip.id, { archetypeUrl: undefined })}
           />
+          <div className="select-desc">Upload or select one image. LTX-2.3 animates it as frame one.</div>
+        </div>
+      )}
+
+      {source === "continue" && (
+        <div className={`continuity-status${hasPrev ? " ready" : " blocked"}`}>
+          <strong>{hasPrev ? "Previous frame ready" : "Previous clip required"}</strong>
+          <span>
+            {hasPrev
+              ? "The last frame of the previous generated clip will be used automatically."
+              : "Generate the clip immediately to the left before continuing this one."}
+          </span>
         </div>
       )}
 
       <div className="option-group">
-        <div className="label">Audio context (auto)</div>
-        <div className="context-card">
-          <div className="row"><span>Section</span><span>{sectionLabel}</span></div>
-          <div className="row"><span>Energy</span><span>{energy.toFixed(2)}</span></div>
-          <div className="row">
-            <span>Duration</span>
-            <span>
-              {durationSec.toFixed(2)}s
-              <span className="dim" style={{ marginLeft: 6 }}>/ {MAX_CLIP_LEN}s cap</span>
-            </span>
-          </div>
+        <div className="label">{promptLabel}</div>
+        <textarea
+          className="prompt"
+          placeholder="Describe the subject, action, setting, camera, dialogue, ambience, music, and sound effects…"
+          value={prompt}
+          onChange={(e) => updateClip(clip.id, { prompt: e.target.value })}
+        />
+        <div className="select-desc">
+          LTX-2.3 creates picture and sound together. Include dialogue in quotes and describe ambience or effects explicitly.
         </div>
       </div>
 
+      <div className="option-group">
+        <div className="label">Camera direction</div>
+        <textarea
+          className="prompt compact"
+          placeholder="Example: slow push-in, eye-level 35mm lens, subject centered…"
+          value={cameraPrompt}
+          onChange={(e) => updateClip(clip.id, { cameraPrompt: e.target.value } as Partial<Clip>)}
+        />
+        <div className="motion-presets">
+          {MOTION_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              className="model-chip"
+              onClick={() => {
+                const next = cameraPrompt
+                  ? `${cameraPrompt}, ${preset.text}`
+                  : preset.text;
+                updateClip(clip.id, { cameraPrompt: next } as Partial<Clip>);
+              }}
+            >
+              + {preset.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="option-group">
+        <div className="label">Clip context</div>
+        <div className="context-card">
+          <div className="row"><span>Song section</span><span>{sectionLabel}</span></div>
+          <div className="row"><span>Energy</span><span>{energy.toFixed(2)}</span></div>
+          <div className="row"><span>Duration</span><span>{durationSec.toFixed(2)}s / {MAX_CLIP_LEN}s</span></div>
+          <div className="row"><span>Audio</span><span>Generated with video</span></div>
+        </div>
+      </div>
+
+      {clip.status === "ready" && clip.videoUrl && (
+        <div className="option-group">
+          <button
+            type="button"
+            className="btn ghost w-full"
+            onClick={onExtractFrame}
+            disabled={extracting}
+          >
+            {extracting ? "Extracting frame…" : "Save last frame as reference"}
+          </button>
+        </div>
+      )}
+
       {clip.status === "failed" && clip.lastError && (
         <div className="error-card">
-          <div className="error-title">last attempt failed</div>
+          <div className="error-title">Generation failed</div>
           <div className="error-message">{clip.lastError}</div>
         </div>
       )}
 
       <div className="sidebar-footer">
-        {!isLibrarySource && (
-          <button
-            className="generate-btn"
-            onClick={onGenerate}
-            disabled={
-              clip.status === "queued" ||
-              clip.status === "generating" ||
-              !canGenerate.ok
-            }
-            title={canGenerate.ok ? undefined : canGenerate.reason}
-          >
-            {clip.status === "queued"
-              ? "Queued…"
-              : clip.status === "generating"
-                ? "Generating…"
-                : clip.status === "failed"
-                  ? "Retry"
-                  : clip.source === "aleph"
-                    ? "Restyle clip"
-                    : clip.source === "lipSync"
-                      ? "Lip-sync vocal"
-                      : clip.status === "ready"
-                        ? "Regenerate"
-                        : "Generate"}
-          </button>
-        )}
+        <button
+          className="generate-btn"
+          onClick={onGenerate}
+          disabled={clip.status === "queued" || clip.status === "generating" || !canGenerate.ok}
+          title={canGenerate.ok ? undefined : canGenerate.reason}
+        >
+          {clip.status === "queued"
+            ? "Queued…"
+            : clip.status === "generating"
+              ? "Generating with LTX-2.3…"
+              : clip.status === "failed"
+                ? "Retry LTX-2.3"
+                : clip.status === "ready"
+                  ? "Regenerate with LTX-2.3"
+                  : "Generate with LTX-2.3"}
+        </button>
 
         {(clip.videoUrl || clip.status !== "empty") && (
           <button
             type="button"
             className="btn ghost clear-clip-btn"
             onClick={() => {
-              const isReady = clip.status === "ready";
-              if (isReady && !confirm("Clear this clip's video? Source choice and prompts are kept.")) return;
+              if (clip.status === "ready" && !confirm("Clear this clip's generated video? The prompt will be kept.")) return;
               updateClip(clip.id, {
                 status: "empty",
                 videoUrl: undefined,
@@ -261,7 +288,6 @@ export function Sidebar() {
                 lastError: undefined,
               });
             }}
-            title="Clear this clip's video — keeps source and prompt"
           >
             Clear clip
           </button>
@@ -271,210 +297,58 @@ export function Sidebar() {
   );
 }
 
-type CanGenerate = { ok: true } | { ok: false; reason: string };
+type CanGenerate = { ok: true; reason?: string } | { ok: false; reason: string };
 
 function checkCanGenerate(
-  clip: Clip,
-  ctx: {
-    prompt: string;
-    imagePrompt: string;
-    avatarId: string | null;
-    avatarStatus: string;
-    songId: string | null;
-    audioUrl: string | null;
-    lookbook: string[];
-    characterImage: string | null;
-    hasPrev: boolean;
-  },
+  source: LtxSource,
+  context: { prompt: string; selectedImage?: string; hasPrev: boolean },
 ): CanGenerate {
-  if (clip.source === "aleph") {
-    if (!clip.videoUrl) return { ok: false, reason: "Aleph needs an existing clip — generate one first" };
-    if (!ctx.prompt.trim()) return { ok: false, reason: "Aleph needs a prompt describing the transformation" };
-    return { ok: true };
+  if (!context.prompt.trim()) {
+    return { ok: false, reason: "Describe the scene and audio before generating" };
   }
-  if (clip.source === "lipSync") {
-    if (!ctx.avatarId) {
-      if (ctx.avatarStatus === "creating") return { ok: false, reason: "Avatar is being created — hang tight…" };
-      if (ctx.avatarStatus === "failed") return { ok: false, reason: "Avatar creation failed — try re-uploading the character image" };
-      return { ok: false, reason: "Upload a character image first (Character panel)" };
-    }
-    if (!ctx.songId || !ctx.audioUrl) return { ok: false, reason: "Lip-Sync needs a loaded song" };
-    return { ok: true };
+  if (source === "imageToVideo" && !context.selectedImage) {
+    return { ok: false, reason: "Select or upload a first-frame reference image" };
   }
-  if (clip.source === "archetype") {
-    if (!(clip.archetypeUrl ?? ctx.lookbook[0])) return { ok: false, reason: "Add a lookbook image first" };
-    return { ok: true };
+  if (source === "continue" && !context.hasPrev) {
+    return { ok: false, reason: "Generate the previous clip first" };
   }
-  if (clip.source === "generated" || clip.source === "textToVideo") {
-    return { ok: true };
-  }
-  if (clip.source === "library") {
-    return { ok: true };
-  }
-  if (clip.source === "continue") {
-    if (ctx.hasPrev) return { ok: true };
-    if (!ctx.characterImage) {
-      return { ok: false, reason: "First clip needs a previous clip or a character image to seed from" };
-    }
-    return { ok: true };
-  }
-  if (!ctx.characterImage) return { ok: false, reason: "Upload a character image first" };
   return { ok: true };
 }
 
-function SourcePicker({
-  clip,
-  effectiveModel,
-  showModelPicker,
+function ImageSeedGrid({
   lookbook,
-  canBridge,
-  onSourceChange,
-  onModelChange,
-  onBridgeChange,
-  onAudioChange,
-  onUpdateClip,
-}: {
-  clip: Clip;
-  effectiveModel: GenerationModel;
-  showModelPicker: boolean;
-  lookbook: string[];
-  canBridge: boolean;
-  onSourceChange: (source: Clip["source"]) => void;
-  onModelChange: (model: GenerationModel) => void;
-  onBridgeChange: (on: boolean) => void;
-  onAudioChange: (on: boolean) => void;
-  onUpdateClip: (id: string, patch: Partial<Clip>) => void;
-}) {
-  return (
-    <div className="option-group">
-      <div className="label">Source</div>
-      <div className="select-wrap">
-        <select
-          className="select"
-          value={clip.source}
-          onChange={(e) => onSourceChange(e.target.value as Clip["source"])}
-        >
-          {SOURCES.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-        <span className="select-chevron">▾</span>
-      </div>
-      <div className="select-desc">
-        {SOURCES.find((s) => s.value === clip.source)?.desc}
-      </div>
-
-      {showModelPicker && (
-        <div className="model-picker">
-          {modelsForSource(clip.source).map((m) => (
-            <button
-              key={m.value}
-              type="button"
-              className={`model-chip${effectiveModel === m.value ? " active" : ""}`}
-              onClick={() => onModelChange(m.value)}
-              title={m.desc}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* LTX Environmental Audio Toggle */}
-      {effectiveModel === "ltx-video" && showModelPicker && (
-        <label className="continuity-toggle" style={{ marginTop: "12px" }}>
-          <input
-            type="checkbox"
-            checked={(clip as any).enableAudio ?? true}
-            onChange={(e) => onAudioChange(e.target.checked)}
-          />
-          <span>Environmental Audio</span>
-          <span className="select-desc">
-            Generate physically synchronized ambient foley and sound effects (LTX-2.3)
-          </span>
-        </label>
-      )}
-
-      {canBridge && (
-        <label className="continuity-toggle">
-          <input
-            type="checkbox"
-            checked={clip.bridge ?? false}
-            onChange={(e) => onBridgeChange(e.target.checked)}
-          />
-          <span>Bridge between neighbors</span>
-          <span className="select-desc">
-            interpolate from prev's last frame to next's first frame
-          </span>
-        </label>
-      )}
-
-      {clip.source === "archetype" && (
-        <div className="archetype-picker">
-          <ArchetypeGrid
-            lookbook={lookbook}
-            archetypeUrl={clip.archetypeUrl}
-            onPick={(url) => onUpdateClip(clip.id, { archetypeUrl: url })}
-            onClear={() => onUpdateClip(clip.id, { archetypeUrl: undefined })}
-          />
-          <div className="archetype-hint">
-            Pick a lookbook image or drop a one-off seed for this clip only.
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ArchetypeGrid({
-  lookbook,
-  archetypeUrl,
+  selectedUrl,
   onPick,
   onClear,
 }: {
   lookbook: string[];
-  archetypeUrl: string | undefined;
+  selectedUrl: string | undefined;
   onPick: (url: string) => void;
   onClear: () => void;
 }) {
-  const customUrl = archetypeUrl && !lookbook.includes(archetypeUrl) ? archetypeUrl : null;
-  const tiles = customUrl ? [...lookbook, customUrl] : lookbook;
-  const effective = archetypeUrl ?? lookbook[0];
-
-  if (tiles.length === 0) {
-    return (
-      <div className="archetype-grid">
-        <AssetUploader className="archetype-tile add" onUploaded={onPick}>
-          <span className="tile-add-label">+</span>
-        </AssetUploader>
-        <div className="archetype-empty">Add lookbook images on the left, or drop a custom seed here.</div>
-      </div>
-    );
-  }
+  const customUrl = selectedUrl && !lookbook.includes(selectedUrl) ? selectedUrl : null;
+  const images = customUrl ? [...lookbook, customUrl] : lookbook;
+  const active = selectedUrl ?? lookbook[0];
 
   return (
     <div className="archetype-grid">
-      {tiles.map((url) => {
-        const selected = effective === url;
+      {images.map((url) => {
         const isCustom = url === customUrl;
         return (
           <div key={url} className={`archetype-tile-wrap${isCustom ? " custom" : ""}`}>
             <button
               type="button"
-              className={`archetype-tile${selected ? " selected" : ""}`}
+              className={`archetype-tile${active === url ? " selected" : ""}`}
               style={{ backgroundImage: `url(${url})` }}
               onClick={() => onPick(url)}
-              aria-label={isCustom ? "select custom seed" : "select archetype"}
+              aria-label="Select first-frame reference"
             />
             {isCustom && (
               <button
                 type="button"
                 className="archetype-clear"
                 onClick={onClear}
-                title="remove custom seed"
-                aria-label="remove custom seed"
+                aria-label="Remove custom reference"
               >
                 ×
               </button>
@@ -485,83 +359,8 @@ function ArchetypeGrid({
       <AssetUploader className="archetype-tile add" onUploaded={onPick}>
         <span className="tile-add-label">+</span>
       </AssetUploader>
-    </div>
-  );
-}
-
-function SavedClipPicker({
-  currentVideoUrl,
-  onPick,
-}: {
-  currentVideoUrl: string | undefined;
-  onPick: (clip: SavedClip) => void;
-}) {
-  const [clips, setClips] = useState<SavedClip[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = () => {
-    setLoading(true);
-    setError(null);
-    listSavedClips()
-      .then(setClips)
-      .catch((err) => setError(getErrorMessage(err)))
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(refresh, []);
-
-  return (
-    <div className="option-group">
-      <div className="label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span>Saved clips</span>
-        <button type="button" className="add" onClick={refresh} disabled={loading}>
-          {loading ? "…" : "refresh"}
-        </button>
-      </div>
-      {error && <div className="cast-error">{error}</div>}
-      {clips && clips.length === 0 && !error && (
-        <div className="archetype-empty">
-          No saved clips yet. Generated clips get saved here automatically — generate one and it'll appear.
-        </div>
-      )}
-      {clips && clips.length > 0 && (
-        <div className="saved-clip-list">
-          {clips.map((c) => {
-            const selected = c.videoUrl === currentVideoUrl;
-            return (
-              <button
-                key={c.id}
-                type="button"
-                className={`saved-clip-item${selected ? " selected" : ""}`}
-                onClick={() => onPick(c)}
-                title={selected ? "currently applied — click to re-apply" : "apply to this segment"}
-              >
-                <video
-                  className="saved-clip-thumb"
-                  src={c.videoUrl}
-                  muted
-                  playsInline
-                  preload="metadata"
-                  onMouseEnter={(e) => (e.currentTarget as HTMLVideoElement).play().catch(() => {})}
-                  onMouseLeave={(e) => {
-                    const v = e.currentTarget as HTMLVideoElement;
-                    v.pause();
-                    v.currentTime = 0;
-                  }}
-                />
-                <div className="saved-clip-meta">
-                  <div className="saved-clip-name">{c.name}</div>
-                  <div className="saved-clip-sub">
-                    {c.duration.toFixed(1)}s · {c.source}
-                    {c.sectionLabel ? ` · ${c.sectionLabel}` : ""}
-                  </div>
-                </div>
-                {selected && <span className="saved-clip-tick">✓</span>}
-              </button>
-            );
-          })}
-        </div>
+      {images.length === 0 && (
+        <div className="archetype-empty">Add the first image that LTX-2.3 should animate.</div>
       )}
     </div>
   );
@@ -572,10 +371,7 @@ function avgRms(curve: number[], start: number, end: number, duration: number): 
   const i0 = Math.max(0, Math.floor((start / duration) * curve.length));
   const i1 = Math.min(curve.length, Math.ceil((end / duration) * curve.length));
   if (i1 <= i0) return curve[i0] ?? 0;
-  let s = 0;
-  for (let i = i0; i < i1; i++) s += curve[i] ?? 0;
-  return s / (i1 - i0);
-}
-    video.onerror = (e) => reject(e);
-  });
+  let total = 0;
+  for (let i = i0; i < i1; i++) total += curve[i] ?? 0;
+  return total / (i1 - i0);
 }

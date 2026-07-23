@@ -260,7 +260,7 @@ export async function listSavedClips(): Promise<SavedClip[]> {
 }
 
 export async function saveClipToServer(clip: Partial<SavedClip> & { id: string; name: string; videoUrl: string; source: string; duration: number }): Promise<SavedClip> {
-  return jsonOrThrow(await fetch("/api/clips", {
+  return jsonOrThrow(await fetch("/api/clips/save", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(clip),
