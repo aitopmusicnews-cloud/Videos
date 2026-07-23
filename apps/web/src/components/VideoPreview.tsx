@@ -39,7 +39,7 @@ export function VideoPreview() {
   const { status: pollStatus } = useJobPolling({
     jobId: activeJobId,
     intervalMs: 3000,
-    onSuccess: (completedUrl: string) => { // FIXED: Added explicit string typing to resolve TS7006
+    onSuccess: (completedUrl: string) => {
       if (targetClip) {
         const patch: any = {
           videoUrl: completedUrl,
@@ -50,7 +50,7 @@ export function VideoPreview() {
         updateClip(targetClip.id, patch);
       }
     },
-    onFailure: (errMsg: string) => { // FIXED: Added explicit string typing to resolve TS7006
+    onFailure: (errMsg: string) => {
       if (targetClip) {
         const patch: any = {
           status: "failed",
@@ -190,14 +190,11 @@ export function VideoPreview() {
     pointerEvents: active && frontSlot === slot ? "auto" : "none",
   });
 
-    // ... your existing code above ...
-
   return (
     <div ref={containerRef} className="preview-container" style={{ position: "relative" }}>
-      <video ref={aRef} muted playsInline crossOrigin="anonymous" style={slotStyle("a")} />
-      <video ref={bRef} muted playsInline crossOrigin="anonymous" style={slotStyle("b")} />
+      <video ref={aRef} muted playsInline preload="auto" style={slotStyle("a")} />
+      <video ref={bRef} muted playsInline preload="auto" style={slotStyle("b")} />
 
-      {/* Loading overlay shown when current playhead is processing */}
       {playheadClip && (playheadClip.status === "generating" || playheadClip.status === "queued") && (
         <div className="preview-empty preview-empty-overlay" style={{ background: "rgba(9, 10, 15, 0.85)", backdropFilter: "blur(4px)", zIndex: 5 }}>
           <div className="h-8 w-8 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-3" />
@@ -210,7 +207,6 @@ export function VideoPreview() {
         </div>
       )}
 
-      {/* Error overlay shown if generation fails */}
       {playheadClip && playheadClip.status === "failed" && !active && (
         <div className="preview-empty preview-empty-overlay" style={{ background: "rgba(9, 10, 15, 0.9)", zIndex: 5 }}>
           <div className="label-big" style={{ color: "#f87171", fontSize: "1.2rem" }}>Generation Failed</div>
@@ -240,8 +236,7 @@ export function VideoPreview() {
       </button>
     </div>
   );
-} // This curly brace closes the main function component perfectly.
-
+}
 
 function seekTo(el: HTMLVideoElement, clip: { start: number; end: number }, playhead: number) {
   const clipDur = clip.end - clip.start;
