@@ -76,7 +76,7 @@ class LTXGenerator:
     ) -> dict:
         import httpx
         from PIL import Image
-        from diffusers.pipelines.ltx2.export_utils import encode_video
+        from diffusers.utils import encode_video
         from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition
         from diffusers.pipelines.ltx2.utils import (
             DEFAULT_NEGATIVE_PROMPT,
