@@ -5,7 +5,7 @@ import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { z } from "zod";
 import { dirname, join, resolve } from "node:path";
-import { existsSync, appendFileSync, statSync, mkdirSync } from "node:fs";
+import { existsSync, appendFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import {
@@ -23,7 +23,6 @@ import {
   generateCharacterFrame,
   readJobFromDisk,
   writeJobToDisk,
-  decodeTaskId,
 } from "./modalAI.js";
 import { submitRender, getRenderJob } from "./render_queue.js";
 import { FfmpegError } from "./ffmpeg.js";
@@ -80,12 +79,8 @@ await app.register(cors, {
 });
 await app.register(rateLimit, { max: 200, timeWindow: "1 minute" });
 await app.register(multipart, { limits: { fileSize: 100 * 1024 * 1024 } });
-const storageRootDir = resolve(join(process.cwd(), config.STORAGE_DIR));
-if (!existsSync(storageRootDir)) {
-  try { mkdirSync(storageRootDir, { recursive: true }); } catch (_) {}
-}
 await app.register(fastifyStatic, {
-  root: storageRootDir,
+  root: join(process.cwd(), config.STORAGE_DIR),
   prefix: "/storage/",
   decorateReply: false,
 });
@@ -96,8 +91,6 @@ const __dirname = dirname(__filename);
 let webDistResolved: string | null = null;
 const possibleDirs = [
   config.WEB_DIST_DIR,
-  resolve(join(process.cwd(), "dist")),
-  "dist",
   resolve(join(__dirname, "..", "..", "web", "dist")),
   resolve(join(__dirname, "..", "web")),
   resolve(join(__dirname, "..", "web", "dist")),
@@ -494,14 +487,41 @@ const CreateAvatarBody = z.object({
 });
 
 app.get("/api/avatars", async (req, reply) => {
-  // FIXED: Returns a clean empty array instead of calling the missing function
   return reply.send([]);
 });
 
-app.post("/api/avatars", async (req, reply) => {
+app.post("/api/avatars/create", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (req, reply) => {
+  const body = CreateAvatarBody.parse(req.body);
   try {
-    const result = await generateCharacterFrame(req.body as any);
-    return reply.send(result);
+    const result = await generateCharacterFrame({
+      model: "gen4_image",
+      promptText: `Generate a character avatar from: ${body.name}`,
+      ratio: "1:1",
+    } as any);
+    return reply.send({
+      avatarId: result.id,
+      status: "READY",
+      failureReason: undefined,
+    });
+  } catch (error: any) {
+    return reply.code(500).send({ error: error.message });
+  }
+});
+
+app.get("/api/avatars/:id", async (req, reply) => {
+  const params = z.object({ id: SafeId }).parse(req.params);
+  try {
+    const job = await readJobFromDisk(params.id);
+    if (!job) {
+      return reply.code(404).send({ error: "Avatar not found" });
+    }
+    return reply.send({
+      id: params.id,
+      name: "Avatar",
+      status: job.status === "completed" ? "READY" : "PROCESSING",
+      imageUri: job.status === "completed" ? job.video_url : undefined,
+      createdAt: Date.now(),
+    });
   } catch (error: any) {
     return reply.code(500).send({ error: error.message });
   }
@@ -512,44 +532,17 @@ app.post("/api/avatars", async (req, reply) => {
 app.get("/api/tasks/:id", async (req, reply) => {
   try {
     const { id } = req.params as { id: string };
-    const decoded = decodeTaskId(id);
-    const lookupId = decoded.id || id;
-
-    let job = await readJobFromDisk(lookupId);
-    if (!job && lookupId !== id) {
-      job = await readJobFromDisk(id);
-    }
-
+    const job = await readJobFromDisk(id);
     if (!job) {
       return reply.code(404).send({ error: "Task or job record not found" });
     }
-
-    const rawStatus = (job.status || "").toLowerCase();
-    const isCompleted = rawStatus === "completed" || rawStatus === "succeeded";
-    const isFailed = rawStatus === "failed";
-    const mappedStatus = isCompleted ? "SUCCEEDED" : isFailed ? "FAILED" : "pending";
-
-    const videoUrl = job.video_url;
-    const outputList = videoUrl ? [videoUrl] : [];
-
-    return reply.send({
-      id,
-      status: mappedStatus,
-      rawStatus: job.status,
-      video_url: videoUrl,
-      outputUrl: videoUrl,
-      output: outputList,
-      error: job.error,
-      prompt: job.prompt,
-      createdAt: job.createdAt,
-    });
+    return reply.send(job);
   } catch (error: any) {
     return reply.code(500).send({ error: error.message });
   }
 });
 
 app.delete("/api/tasks/:id", async (req, reply) => {
-  // FIXED: Returns a clean success message instead of calling the missing function
   return reply.send({ success: true, message: "Task references cleared from workspace." });
 });
 
@@ -587,7 +580,7 @@ const VocalStemBody = z.object({
   audioUrl: urlOrPath,
 });
 
-app.post("/api/songs/vocal-stem", async (req, reply) => {
+app.post("/api/audio/vocal-stem", async (req, reply) => {
   const body = VocalStemBody.parse(req.body);
   const result = await analyzeVocalTrack(body.audioUrl);
   return reply.send(result);
@@ -623,14 +616,31 @@ const RenderBody = z
     message: "clip extends past project duration",
   });
 
-app.post("/api/render", { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } }, async (req, reply) => {
+app.post("/api/renders/submit", { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } }, async (req, reply) => {
   const body = RenderBody.parse(req.body);
-  const job = submitRender(body as any);
+  const job = submitRender(body);
   return reply.send({
     renderId: job.id,
     state: job.state,
     queuePosition: job.queuePosition,
   });
+});
+
+app.post("/api/render", { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } }, async (req, reply) => {
+  const body = RenderBody.parse(req.body);
+  const job = submitRender(body);
+  return reply.send({
+    renderId: job.id,
+    state: job.state,
+    queuePosition: job.queuePosition,
+  });
+});
+
+app.get("/api/renders/:renderId", async (req, reply) => {
+  const params = z.object({ renderId: SafeId }).parse(req.params);
+  const job = getRenderJob(params.renderId);
+  if (!job) return reply.code(404).send({ error: "render job not found" });
+  return reply.send(job);
 });
 
 app.get("/api/render/jobs/:renderId", async (req, reply) => {
@@ -646,16 +656,23 @@ const SaveProjectBody = z.object({
   id: SafeId,
   name: z.string().min(1).max(200),
   state: z.record(z.unknown()),
+  thumbnailUrl: z.string().optional(),
 });
 
 app.get("/api/projects", async (_req, reply) => {
   const projects = await listProjects();
-  return reply.send({ projects });
+  return reply.send(projects);
+});
+
+app.post("/api/projects", async (req, reply) => {
+  const body = SaveProjectBody.parse(req.body);
+  const meta = await saveProject(body.id, body.name, body.state, body.thumbnailUrl);
+  return reply.send(meta);
 });
 
 app.post("/api/projects/save", async (req, reply) => {
   const body = SaveProjectBody.parse(req.body);
-  const meta = await saveProject(body.id, body.name, body.state);
+  const meta = await saveProject(body.id, body.name, body.state, body.thumbnailUrl);
   return reply.send(meta);
 });
 
@@ -673,6 +690,11 @@ app.delete("/api/projects/:id", async (req, reply) => {
   return reply.send({ ok: true });
 });
 
+app.get("/api/renders", async (_req, reply) => {
+  const renders = await listRenders();
+  return reply.send(renders);
+});
+
 app.get("/api/library/renders", async (_req, reply) => {
   const renders = await listRenders();
   return reply.send({ renders });
@@ -688,6 +710,7 @@ const SaveClipBody = z.object({
   prompt: z.string().nullable(),
   duration: z.number().positive(),
   sectionLabel: z.string().nullable(),
+  savedAt: z.string().optional(),
   folderId: z.string().nullable().optional(),
   model: z.string().nullable().optional(),
   generationTaskId: z.string().nullable().optional(),
@@ -695,12 +718,18 @@ const SaveClipBody = z.object({
 
 app.get("/api/clips", async (_req, reply) => {
   const clips = await listClips();
-  return reply.send({ clips });
+  return reply.send(clips);
+});
+
+app.post("/api/clips", async (req, reply) => {
+  const body = SaveClipBody.parse(req.body);
+  const saved = await saveClip(body);
+  return reply.send(saved);
 });
 
 app.post("/api/clips/save", async (req, reply) => {
   const body = SaveClipBody.parse(req.body);
-  const saved = await saveClip(body as any);
+  const saved = await saveClip(body);
   return reply.send(saved);
 });
 
@@ -720,7 +749,25 @@ const SaveImageBody = z.object({
   source: z.string(),
   prompt: z.string().nullable(),
   model: z.string().nullable(),
+  savedAt: z.string().optional(),
   folderId: z.string().nullable().optional(),
+});
+
+app.get("/api/images/library", async (_req, reply) => {
+  const images = await listImages();
+  return reply.send(images);
+});
+
+app.post("/api/images/library", async (req, reply) => {
+  const body = SaveImageBody.parse(req.body);
+  const saved = await saveImage(body);
+  return reply.send(saved);
+});
+
+app.post("/api/library/images/save", async (req, reply) => {
+  const body = SaveImageBody.parse(req.body);
+  const saved = await saveImage(body);
+  return reply.send(saved);
 });
 
 app.get("/api/library/images", async (_req, reply) => {
@@ -728,10 +775,11 @@ app.get("/api/library/images", async (_req, reply) => {
   return reply.send({ images });
 });
 
-app.post("/api/library/images/save", async (req, reply) => {
-  const body = SaveImageBody.parse(req.body);
-  const saved = await saveImage(body as any);
-  return reply.send(saved);
+app.delete("/api/images/library/:id", async (req, reply) => {
+  const params = z.object({ id: SafeId }).parse(req.params);
+  const deleted = await deleteImage(params.id);
+  if (!deleted) return reply.code(404).send({ error: "not found" });
+  return reply.send({ ok: true });
 });
 
 app.delete("/api/library/images/:id", async (req, reply) => {
@@ -748,16 +796,23 @@ const SaveFolderBody = z.object({
   name: z.string().min(1).max(200),
   parentId: z.string().nullable(),
   type: z.enum(["clips", "images"]),
+  createdAt: z.string().optional(),
 });
 
 app.get("/api/library/folders", async (_req, reply) => {
   const folders = await listFolders();
-  return reply.send({ folders });
+  return reply.send(folders);
+});
+
+app.post("/api/library/folders", async (req, reply) => {
+  const body = SaveFolderBody.parse(req.body);
+  const saved = await saveFolder(body);
+  return reply.send(saved);
 });
 
 app.post("/api/library/folders/save", async (req, reply) => {
   const body = SaveFolderBody.parse(req.body);
-  const saved = await saveFolder(body as any);
+  const saved = await saveFolder(body);
   return reply.send(saved);
 });
 
@@ -769,9 +824,6 @@ app.delete("/api/library/folders/:id", async (req, reply) => {
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : config.PORT;
-app.listen({ port, host: "0.0.0.0" }).then(() => {
-  app.log.info(`api listening on port ${port}`);
-});
 app.listen({ port, host: "0.0.0.0" }).then(() => {
   app.log.info(`api listening on port ${port}`);
 });
