@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: music-video-studio
+    env: node
+    plan: starter
+    buildCommand: pnpm install && pnpm --filter @mvs/web build && pnpm --filter @mvs/api build
+    startCommand: node apps/api/dist/server.js
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: NODE_ENV
+        value: production
+      - key: WEB_DIST_DIR
+        value: ./apps/web/dist
+      - key: STORAGE_BACKEND
+        value: s3
+      - key: S3_BUCKET
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_REGION
+        value: us-east-1
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: MODAL_AUDIO_URL
+        sync: false
+      - key: MODAL_LTX_URL
+        sync: false
+      - key: MODAL_MEDIA_SUITE_URL
+        sync: false

@@ -1,0 +1,7 @@
+[ {
+  "AllowedHeaders": ["*"],
+  "AllowedMethods": ["GET", "PUT", "POST", "HEAD"],
+  "AllowedOrigins": ["https://rendernodock.onrender.com", "http://localhost:3000"],
+  "ExposeHeaders": ["ETag", "x-amz-request-id", "x-amz-id-2"],
+  "MaxAgeSeconds": 3600
+}]

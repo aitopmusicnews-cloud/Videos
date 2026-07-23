@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 — Ready to compose</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <!-- Header -->
+  <header class="header">
+    <div class="title">
+      <span class="dot"></span>
+      <span>"Midnight Drive"</span>
+      <span class="dim mono" style="margin-left:8px">120 BPM · C minor · 3:24</span>
+    </div>
+    <div class="actions">
+      <button class="btn">Render preview</button>
+      <button class="btn primary">Export MP4</button>
+    </div>
+  </header>
+
+  <!-- Left rail -->
+  <aside class="left">
+    <div class="section">
+      <div class="section-header">
+        <span class="label">Cast</span>
+        <span class="add">+ swap</span>
+      </div>
+      <div class="cast-card">
+        <div class="thumb"></div>
+        <div>
+          <div class="name">Anya</div>
+          <div class="role">Protagonist</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">
+        <span class="label">Lookbook</span>
+        <span class="add">+ add</span>
+      </div>
+      <div class="lookbook">
+        <div class="tile" style="background: linear-gradient(135deg,#3d2756,#1a0e2a);"></div>
+        <div class="tile" style="background: linear-gradient(135deg,#5c3a2a,#2a1c14);"></div>
+        <div class="tile" style="background: linear-gradient(135deg,#1f3d3a,#0a1a18);"></div>
+        <div class="tile" style="background: linear-gradient(135deg,#4a2c5e,#241432);"></div>
+        <div class="tile" style="background: linear-gradient(135deg,#2c3a5e,#141a32);"></div>
+        <div class="tile add">+</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">
+        <span class="label">Audio analysis</span>
+      </div>
+      <div class="context-card">
+        <div class="row"><span>Sections</span><span>6</span></div>
+        <div class="row"><span>Bars</span><span>96</span></div>
+        <div class="row"><span>Lyrics</span><span>aligned</span></div>
+        <div class="row"><span>Vocal stem</span><span>ready</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Preview -->
+  <main class="main">
+    <div class="preview">
+      <div class="play-hint">
+        <div class="triangle"></div>
+        <span>Press Space to play · 0:00</span>
+      </div>
+    </div>
+  </main>
+
+  <!-- Timeline -->
+  <section class="timeline">
+    <div class="transport">
+      <div class="play">▶</div>
+      <div class="time">0:00 / 3:24</div>
+      <div class="spacer"></div>
+      <div class="zoom">
+        <span>zoom</span>
+        <div class="zoom-bar"><div></div></div>
+      </div>
+    </div>
+
+    <div class="tracks">
+      <div class="tracks-inner">
+        <!-- Sections row -->
+        <div class="row sections">
+          <div class="section-chip" style="flex: 0.5; background: var(--section-intro);">Intro</div>
+          <div class="section-chip" style="flex: 1.2; background: var(--section-verse);">Verse 1</div>
+          <div class="section-chip" style="flex: 1; background: var(--section-chorus);">Chorus 1</div>
+          <div class="section-chip" style="flex: 1.2; background: var(--section-verse);">Verse 2</div>
+          <div class="section-chip" style="flex: 1; background: var(--section-chorus);">Chorus 2</div>
+          <div class="section-chip" style="flex: 0.6; background: var(--section-bridge);">Bridge</div>
+          <div class="section-chip" style="flex: 1; background: var(--section-chorus);">Chorus 3</div>
+        </div>
+
+        <!-- Waveform row -->
+        <div class="row waveform">
+          <svg class="waveform-canvas" viewBox="0 0 1000 80" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+            <!-- procedural-ish waveform with ~200 vertical lines -->
+            <g fill="var(--waveform)">
+              <!-- Build via JS would be cleaner but a wireframe stays static. Hand-roll 200 lines. -->
+              <!-- script generates these on load -->
+            </g>
+            <g id="wave-bars"></g>
+          </svg>
+          <div class="beat-grid"></div>
+          <!-- playhead at start -->
+          <div class="playhead" style="left: 0%;"></div>
+        </div>
+
+        <!-- Lyrics row -->
+        <div class="row lyrics">
+          <span class="lyric" style="margin-left: 8%;">"neon rain on broken glass…"</span>
+          <span class="lyric" style="margin-left: 18%;">"…we'll never sleep tonight"</span>
+          <span class="lyric" style="margin-left: 18%;">"…tail-lights dissolve to dawn"</span>
+        </div>
+
+        <!-- Video track -->
+        <div class="row video">
+          <div class="clip-track">
+            <!-- Intro filled, rest empty regions (one per section) -->
+            <div class="clip filled" style="flex: 0.5;">
+              <div class="clip-label">Intro · gen-4.5</div>
+            </div>
+            <div class="clip empty" style="flex: 1.2;">
+              <span>+ click to fill verse 1</span>
+            </div>
+            <div class="clip empty" style="flex: 1;">
+              <span>+ click to fill chorus 1</span>
+            </div>
+            <div class="clip empty" style="flex: 1.2;">
+              <span>+ click to fill verse 2</span>
+            </div>
+            <div class="clip empty" style="flex: 1;">
+              <span>+ click to fill chorus 2</span>
+            </div>
+            <div class="clip empty" style="flex: 0.6;">
+              <span>+ bridge</span>
+            </div>
+            <div class="clip empty" style="flex: 1;">
+              <span>+ chorus 3</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+  // Procedural waveform — 240 bars with smooth-ish envelope mimicking song structure.
+  (function() {
+    const g = document.getElementById('wave-bars');
+    const N = 240;
+    const sectionEnvelope = [
+      // [start, end, amplitude]
+      [0.00, 0.07, 0.25], // intro
+      [0.07, 0.24, 0.55], // verse 1
+      [0.24, 0.37, 0.95], // chorus 1
+      [0.37, 0.54, 0.55], // verse 2
+      [0.54, 0.68, 1.00], // chorus 2
+      [0.68, 0.76, 0.40], // bridge
+      [0.76, 1.00, 0.95], // chorus 3
+    ];
+    let bars = '';
+    for (let i = 0; i < N; i++) {
+      const t = i / N;
+      const env = sectionEnvelope.find(([s, e]) => t >= s && t < e) || sectionEnvelope[sectionEnvelope.length - 1];
+      const amp = env[2];
+      // pseudo-random within band
+      const rng = Math.sin(i * 12.9898) * 43758.5453;
+      const r = (rng - Math.floor(rng));
+      const h = (0.30 + 0.70 * r) * amp * 38;
+      const x = (i / N) * 1000;
+      const y = 40 - h;
+      const w = 1000 / N - 0.6;
+      bars += `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${(h*2).toFixed(2)}" fill="var(--waveform)" rx="0.5"/>`;
+    }
+    g.innerHTML = bars;
+  })();
+</script>
+</body>
+</html>

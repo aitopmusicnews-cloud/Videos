@@ -1,0 +1,6 @@
+{
+  "name": "Keep Em' Thirsty - AI Music Video Studio",
+  "description": "AI Music Video Generator that syncs visual assets to uploaded audio tracks using generative style transfer, aligned to the gritty, neo-noir rap track 'Keep Em' Thirsty'.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

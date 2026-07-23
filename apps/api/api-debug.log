@@ -1,0 +1,90 @@
+[2026-07-12T15:20:59.495Z] POST /api/generate/image-to-video
+Headers: {"host":"localhost:3001","user-agent":"curl/7.88.1","accept":"*/*","content-type":"application/json","content-length":"29"}
+Body: {"invalid_key":"some_value"}
+Error: ZodError - [
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "model"
+    ],
+    "message": "Required"
+  },
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "promptImage"
+    ],
+    "message": "Required"
+  },
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "ratio"
+    ],
+    "message": "Required"
+  },
+  {
+    "code": "invalid_type",
+    "expected": "number",
+    "received": "undefined",
+    "path": [
+      "duration"
+    ],
+    "message": "Required"
+  }
+]
+Stack: ZodError: [
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "model"
+    ],
+    "message": "Required"
+  },
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "promptImage"
+    ],
+    "message": "Required"
+  },
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "ratio"
+    ],
+    "message": "Required"
+  },
+  {
+    "code": "invalid_type",
+    "expected": "number",
+    "received": "undefined",
+    "path": [
+      "duration"
+    ],
+    "message": "Required"
+  }
+]
+    at get error (file:///app/applet/node_modules/zod/v3/types.js:39:31)
+    at ZodObject.parse (file:///app/applet/node_modules/zod/v3/types.js:114:22)
+    at Object.<anonymous> (/app/applet/apps/api/src/server.ts:326:60)
+    at preHandlerCallbackInner (/app/applet/node_modules/fastify/lib/handle-request.js:175:24)
+    at preHandlerCallback (/app/applet/node_modules/fastify/lib/handle-request.js:140:5)
+    at validationCompleted (/app/applet/node_modules/fastify/lib/handle-request.js:130:5)
+    at preValidationCallback (/app/applet/node_modules/fastify/lib/handle-request.js:107:5)
+    at handler (/app/applet/node_modules/fastify/lib/handle-request.js:84:7)
+    at onDone (/app/applet/node_modules/fastify/lib/content-type-parser.js:231:5)
+    at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+-------------------------------------------

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Wireframes</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body { padding: 40px; overflow: auto; }
+  h1 { font-weight: 500; margin: 0 0 8px; }
+  p { color: var(--text-dim); margin-top: 0; max-width: 60ch; }
+  ul { list-style: none; padding: 0; margin: 24px 0 0; display: grid; gap: 12px; max-width: 480px; }
+  li a {
+    display: block; padding: 14px 16px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); text-decoration: none;
+  }
+  li a:hover { border-color: var(--border-strong); background: var(--surface-2); }
+  li a .num { color: var(--text-faint); margin-right: 8px; font-family: "JetBrains Mono", monospace; font-size: 11px; }
+  li a .desc { color: var(--text-dim); font-size: 12px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<h1>Wireframes</h1>
+<p>Audio-aware AI timeline editor. Click through the states.</p>
+<ul>
+  <li><a href="01-ready.html"><span class="num">01</span>Ready to compose<div class="desc">Song loaded, cast set, no region selected</div></a></li>
+  <li><a href="02-region-selected.html"><span class="num">02</span>Region selected<div class="desc">Chorus 1 clicked, sidebar open with generation options</div></a></li>
+</ul>
+</body>
+</html>
