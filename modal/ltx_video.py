@@ -76,7 +76,6 @@ class LTXGenerator:
     ) -> dict:
         import httpx
         from PIL import Image
-        from diffusers.utils import encode_video
         from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition
         from diffusers.pipelines.ltx2.utils import (
             DEFAULT_NEGATIVE_PROMPT,
@@ -120,12 +119,12 @@ class LTXGenerator:
 
             filename = f"ltx23-{uuid.uuid4()}.mp4"
             filepath = Path(OUTPUT_DIR) / filename
-            encode_video(
-                video[0],
+            self._encode_video_with_audio(
+                video_frames=video[0],
+                audio_tensor=audio[0],
                 fps=fps,
-                audio=audio[0].float().cpu(),
-                audio_sample_rate=self.pipe.vocoder.config.output_sampling_rate,
-                output_path=str(filepath),
+                audio_sample_rate=int(self.pipe.vocoder.config.output_sampling_rate),
+                output_path=filepath,
             )
             output_volume.commit()
 
@@ -148,6 +147,92 @@ class LTXGenerator:
                 {"status": "failed", "job_id": job_id, "error": message},
             )
             raise
+
+    @staticmethod
+    def _encode_video_with_audio(
+        video_frames,
+        audio_tensor,
+        fps: float,
+        audio_sample_rate: int,
+        output_path: Path,
+    ) -> None:
+        """Encode LTX frames and audio without Diffusers' unstable encode_video shim."""
+        import subprocess
+        import wave
+
+        import imageio.v2 as imageio
+        import numpy as np
+
+        silent_video_path = output_path.with_suffix(".silent.mp4")
+        audio_path = output_path.with_suffix(".wav")
+
+        frames = np.asarray(video_frames)
+        if np.issubdtype(frames.dtype, np.floating):
+            frames = np.clip(frames, 0.0, 1.0)
+            frames = np.rint(frames * 255.0).astype(np.uint8)
+        elif frames.dtype != np.uint8:
+            frames = np.clip(frames, 0, 255).astype(np.uint8)
+
+        audio = audio_tensor.detach().float().cpu().numpy()
+        audio = np.squeeze(audio)
+        if audio.ndim == 1:
+            audio = audio[np.newaxis, :]
+        elif audio.ndim != 2:
+            raise ValueError(f"Unexpected audio shape: {audio.shape}")
+
+        # LTX audio is channels-first. WAV PCM expects samples-first.
+        audio = np.clip(audio, -1.0, 1.0)
+        pcm = np.rint(audio.T * 32767.0).astype(np.int16)
+
+        try:
+            imageio.mimsave(
+                silent_video_path,
+                frames,
+                fps=fps,
+                codec="libx264",
+                quality=8,
+                macro_block_size=None,
+                ffmpeg_log_level="error",
+            )
+
+            with wave.open(str(audio_path), "wb") as wav_file:
+                wav_file.setnchannels(int(pcm.shape[1]))
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(audio_sample_rate)
+                wav_file.writeframes(pcm.tobytes())
+
+            completed = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(silent_video_path),
+                    "-i",
+                    str(audio_path),
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    "-shortest",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(f"ffmpeg mux failed: {completed.stderr.strip()}")
+            if not output_path.is_file() or output_path.stat().st_size == 0:
+                raise RuntimeError("ffmpeg did not create a valid MP4 file")
+        finally:
+            silent_video_path.unlink(missing_ok=True)
+            audio_path.unlink(missing_ok=True)
 
     @staticmethod
     def _send_webhook(webhook_url: str | None, payload: dict) -> None:
