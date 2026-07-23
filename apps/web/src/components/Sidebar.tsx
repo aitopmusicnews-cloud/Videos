@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore, MAX_CLIP_LEN } from "../lib/store.js";
-import type { Clip } from "@mvs/shared";
+import type { Clip, Task } from "@mvs/shared";
 import { enqueueGeneration } from "../lib/scheduler.js";
-import { extractLastFrame } from "../lib/api.js";
+import {
+  extractLastFrame,
+  pollTask,
+  startLipSync,
+  startTextToImage,
+} from "../lib/api.js";
 import { AssetUploader } from "./AssetUploader.js";
 import { toast } from "../lib/toast.js";
 
@@ -43,30 +48,44 @@ function normalizeSource(source: string): LtxSource {
   return "textToVideo";
 }
 
+function taskOutputUrl(task: Task): string | undefined {
+  if (task.outputUrl) return task.outputUrl;
+  if (Array.isArray(task.output)) return task.output[0];
+  return task.output?.videoUrl ?? task.output?.imageUrl ?? task.output?.url;
+}
+
 export function Sidebar() {
   const selectedId = useStore((s) => s.selectedClipId);
   const clips = useStore((s) => s.clips);
   const analysis = useStore((s) => s.analysis);
+  const audioUrl = useStore((s) => s.audioUrl);
   const lookbook = useStore((s) => s.lookbook);
   const addLookbook = useStore((s) => s.addLookbook);
   const updateClip = useStore((s) => s.updateClip);
 
   const [extracting, setExtracting] = useState(false);
+  const [creatingCharacter, setCreatingCharacter] = useState(false);
+  const [characterPrompt, setCharacterPrompt] = useState("");
+  const [lipSyncing, setLipSyncing] = useState(false);
+  const [referenceStrength, setReferenceStrength] = useState(1);
   const clip = useMemo(() => clips.find((c) => c.id === selectedId) ?? null, [clips, selectedId]);
   const source = normalizeSource(clip?.source ?? "textToVideo");
 
   useEffect(() => {
-    if (clip && clip.source !== source && clip.status !== "ready") {
+    if (clip && clip.source !== source && clip.status !== "ready" && clip.source !== "lipSync") {
       updateClip(clip.id, { source, model: "ltx-video" });
     }
   }, [clip?.id, clip?.source, clip?.status, source, updateClip]);
 
   if (!clip || !analysis) return null;
 
-  const section = analysis.sections.find((s) => s.start <= clip.start && s.end >= clip.end);
+  const sections = analysis.sections ?? [];
+  const rmsCurve = analysis.rmsCurve ?? [];
+  const analysisDuration = analysis.duration ?? Math.max(clip.end, 1);
+  const section = sections.find((s) => (s.start ?? 0) <= clip.start && (s.end ?? 0) >= clip.end);
   const sectionLabel = section?.label ?? "section";
   const durationSec = clip.end - clip.start;
-  const energy = avgRms(analysis.rmsCurve, clip.start, clip.end, analysis.duration);
+  const energy = avgRms(rmsCurve, clip.start, clip.end, analysisDuration);
   const prompt = clip.prompt ?? "";
   const cameraPrompt = (clip as Clip & { cameraPrompt?: string }).cameraPrompt ?? "";
 
@@ -110,6 +129,93 @@ export function Sidebar() {
     });
   };
 
+  const onCreateCharacter = async () => {
+    const text = characterPrompt.trim();
+    if (!text) {
+      toast.warning("Describe the artist or reference frame first");
+      return;
+    }
+    setCreatingCharacter(true);
+    try {
+      const result = await startTextToImage({
+        promptText: text,
+        ratio: "16:9",
+        model: "sdxl",
+      }) as unknown as { imageUrl: string };
+      if (!result.imageUrl) throw new Error("The image service returned no image URL");
+      addLookbook(result.imageUrl);
+      updateClip(clip.id, { archetypeUrl: result.imageUrl });
+      toast.success("Character reference created and selected");
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      toast.error(`Character generation failed: ${reason.slice(0, 120)}`);
+    } finally {
+      setCreatingCharacter(false);
+    }
+  };
+
+  const onLipSync = async () => {
+    if (!clip.videoUrl || clip.status !== "ready") {
+      toast.warning("Generate or upload a performance clip before lip-syncing");
+      return;
+    }
+    if (!audioUrl) {
+      toast.warning("Load the song before lip-syncing");
+      return;
+    }
+
+    const referenceVideoUrl = clip.videoUrl;
+    const previousSource = clip.source;
+    setLipSyncing(true);
+    try {
+      toast.info("Preparing the matching song segment for LipDub…");
+      updateClip(clip.id, {
+        status: "generating",
+        generationTaskId: undefined,
+        lastError: undefined,
+      });
+
+      const task = await startLipSync({
+        videoUrl: referenceVideoUrl,
+        audioUrl,
+        audioStart: clip.start,
+        audioEnd: clip.end,
+        promptText: prompt.trim() || "The performer sings naturally to the supplied vocal performance with accurate mouth movement and stable identity.",
+        referenceStrength,
+        model: "ltx-2.3-lipdub",
+      });
+      updateClip(clip.id, { generationTaskId: task.id });
+
+      const final = await pollTask(task.id, 3000, 1_800_000);
+      const outputUrl = taskOutputUrl(final);
+      if ((final.status || "").toUpperCase() !== "SUCCEEDED" || !outputUrl) {
+        throw new Error(final.error ?? `LipDub ended in ${final.status}`);
+      }
+
+      updateClip(clip.id, {
+        videoUrl: outputUrl,
+        source: "lipSync",
+        model: "ltx-2.3-lipdub",
+        status: "ready",
+        generationTaskId: undefined,
+        lastError: undefined,
+      });
+      toast.success("LTX-2.3 LipDub clip ready");
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      updateClip(clip.id, {
+        videoUrl: referenceVideoUrl,
+        source: previousSource,
+        status: "ready",
+        generationTaskId: undefined,
+        lastError: reason,
+      });
+      toast.error(`Lip-sync failed: ${reason.slice(0, 140)}`);
+    } finally {
+      setLipSyncing(false);
+    }
+  };
+
   const onExtractFrame = async () => {
     if (!clip.videoUrl) return;
     setExtracting(true);
@@ -139,8 +245,27 @@ export function Sidebar() {
       </div>
 
       <div className="ltx-engine-card">
-        <div className="ltx-engine-title">LTX-2.3 Distilled</div>
-        <div className="ltx-engine-meta">768×512 · 24 FPS · native synchronized audio · Modal A100</div>
+        <div className="ltx-engine-title">Complete Music Video Stack</div>
+        <div className="ltx-engine-meta">LTX-2.3 video + audio · character frames · LipDub · Modal GPU</div>
+      </div>
+
+      <div className="option-group">
+        <div className="label">Create artist / reference frame</div>
+        <textarea
+          className="prompt compact"
+          placeholder="Describe the artist, wardrobe, face, location, lighting, and camera framing…"
+          value={characterPrompt}
+          onChange={(e) => setCharacterPrompt(e.target.value)}
+        />
+        <button
+          type="button"
+          className="btn ghost w-full"
+          onClick={onCreateCharacter}
+          disabled={creatingCharacter}
+        >
+          {creatingCharacter ? "Creating reference…" : "Generate character reference"}
+        </button>
+        <div className="select-desc">The result is added to your reference images and selected for this clip.</div>
       </div>
 
       <div className="option-group">
@@ -171,7 +296,7 @@ export function Sidebar() {
             onPick={(url) => updateClip(clip.id, { archetypeUrl: url })}
             onClear={() => updateClip(clip.id, { archetypeUrl: undefined })}
           />
-          <div className="select-desc">Upload or select one image. LTX-2.3 animates it as frame one.</div>
+          <div className="select-desc">Upload, generate, or select one image. LTX-2.3 animates it as frame one.</div>
         </div>
       )}
 
@@ -232,9 +357,36 @@ export function Sidebar() {
           <div className="row"><span>Song section</span><span>{sectionLabel}</span></div>
           <div className="row"><span>Energy</span><span>{energy.toFixed(2)}</span></div>
           <div className="row"><span>Duration</span><span>{durationSec.toFixed(2)}s / {MAX_CLIP_LEN}s</span></div>
-          <div className="row"><span>Audio</span><span>Generated with video</span></div>
+          <div className="row"><span>Audio</span><span>Generated or song-synced</span></div>
         </div>
       </div>
+
+      {clip.status === "ready" && clip.videoUrl && (
+        <div className="option-group">
+          <div className="label">Performance lip-sync</div>
+          <div className="select-desc">
+            Uses this video as the performance reference and automatically slices the matching part of your song.
+          </div>
+          <label className="label" htmlFor="lipdub-strength">Identity / motion strength · {referenceStrength.toFixed(2)}</label>
+          <input
+            id="lipdub-strength"
+            type="range"
+            min="0.5"
+            max="1.25"
+            step="0.05"
+            value={referenceStrength}
+            onChange={(e) => setReferenceStrength(Number(e.target.value))}
+          />
+          <button
+            type="button"
+            className="generate-btn"
+            onClick={onLipSync}
+            disabled={lipSyncing || !audioUrl}
+          >
+            {lipSyncing ? "Lip-syncing with LTX-2.3…" : "Lip-sync this clip to the song"}
+          </button>
+        </div>
+      )}
 
       {clip.status === "ready" && clip.videoUrl && (
         <div className="option-group">
@@ -249,9 +401,9 @@ export function Sidebar() {
         </div>
       )}
 
-      {clip.status === "failed" && clip.lastError && (
+      {clip.lastError && (
         <div className="error-card">
-          <div className="error-title">Generation failed</div>
+          <div className="error-title">Last operation</div>
           <div className="error-message">{clip.lastError}</div>
         </div>
       )}
