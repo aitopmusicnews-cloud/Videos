@@ -1,4 +1,4 @@
-import { storage } from "./storage.js";
+import { playableUrl, storage } from "./storage.js";
 import { rehostExternalUrl } from "./rehost.js";
 import type { SavedImage } from "@mvs/shared";
 
@@ -6,14 +6,6 @@ function imageMetaKey(id: string): string {
   return `images/${id}/image.json`;
 }
 
-/**
- * Persist a SavedImage entry. The asset URL is normalized through
- * rehostExternalUrl: owned URLs (already on /storage or our S3 bucket)
- * pass through unchanged; external URLs (Runway etc.) get downloaded and
- * re-uploaded via the storage backend so the entry survives the remote
- * signed link's ~24–48h expiry. Metadata goes through the same backend,
- * so saved images persist across container restarts.
- */
 export async function saveImage(input: {
   id: string;
   name: string;
@@ -23,12 +15,12 @@ export async function saveImage(input: {
   model: string | null;
   folderId?: string | null;
 }): Promise<SavedImage> {
-  const url = await rehostExternalUrl(input.url, ".png");
+  const durableUrl = await rehostExternalUrl(input.url, ".png");
 
   const saved: SavedImage = {
     id: input.id,
     name: input.name,
-    url,
+    url: durableUrl,
     source: input.source,
     prompt: input.prompt,
     model: input.model,
@@ -37,7 +29,7 @@ export async function saveImage(input: {
   };
 
   await storage.saveJson(imageMetaKey(input.id), saved);
-  return saved;
+  return { ...saved, url: await playableUrl(saved.url) };
 }
 
 export async function listImages(): Promise<SavedImage[]> {
@@ -46,11 +38,13 @@ export async function listImages(): Promise<SavedImage[]> {
   for (const key of keys) {
     if (!key.endsWith("/image.json")) continue;
     try {
-      const i = await storage.loadJson<SavedImage>(key);
-      if (i) images.push(i);
-    } catch { /* skip corrupt */ }
+      const image = await storage.loadJson<SavedImage>(key);
+      if (image) images.push({ ...image, url: await playableUrl(image.url) });
+    } catch {
+      // Skip corrupt or inaccessible metadata entries.
+    }
   }
-  images.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+  images.sort((a, b) => (b.savedAt ?? "").localeCompare(a.savedAt ?? ""));
   return images;
 }
 
