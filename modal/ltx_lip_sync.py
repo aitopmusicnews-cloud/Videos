@@ -8,6 +8,10 @@ Deploy after creating a Modal secret named ``huggingface`` containing HF_TOKEN:
 The Hugging Face token must have access to:
 - Lightricks/LTX-2.3
 - Lightricks/LTX-2.3-22b-IC-LoRA-LipDub
+
+This deployment targets an A100-80GB. A100 GPUs support BF16 but not the
+Hopper FP8 E4M3 format used by LTX ``fp8-cast``. The official LipDub pipeline
+therefore runs the BF16 checkpoint without FP8 quantization.
 """
 
 from __future__ import annotations
@@ -56,9 +60,9 @@ web_image = modal.Image.debian_slim(python_version="3.12").pip_install(
     "fastapi[standard]>=0.115.8",
 )
 
-# Pin the complete PyTorch family to one official CUDA 12.8 release. Installing
-# an unpinned torchvision allowed the LTX dependency resolver to select a newer
-# CUDA 13 Torch build, which failed in Modal with missing libcudart.so.13.
+# Keep the complete PyTorch family on one official CUDA 12.8 release. An
+# unpinned torchvision previously let dependency resolution select a CUDA 13
+# Torch build, which failed because the image did not contain libcudart.so.13.
 lipdub_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("build-essential", "ffmpeg", "git")
@@ -84,6 +88,7 @@ lipdub_image = (
             "HF_XET_HIGH_PERFORMANCE": "1",
             "TOKENIZERS_PARALLELISM": "false",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            "CUDA_MODULE_LOADING": "LAZY",
         }
     )
 )
@@ -149,6 +154,7 @@ def _write_media(payload: dict[str, Any], kind: str, work_dir: Path) -> Path:
 def _send_webhook(webhook_url: str | None, payload: dict[str, Any]) -> None:
     if not webhook_url:
         return
+
     import httpx
 
     try:
@@ -184,7 +190,7 @@ def _gemma_snapshot_error(root: Path) -> str | None:
         from safetensors import safe_open
 
         for shard in GEMMA_SHARDS:
-            with safe_open(root / shard, framework="pt", device="cpu") as handle:
+            with safe_open(str(root / shard), framework="pt", device="cpu") as handle:
                 if next(iter(handle.keys()), None) is None:
                     return f"empty safetensors shard: {shard}"
     except Exception as error:  # noqa: BLE001
@@ -267,10 +273,12 @@ class LipDubRunner:
     @modal.method()
     def warmup(self) -> dict[str, Any]:
         print("[LTX-2.3 LipDub] Warm-up complete; worker is ready.")
-        return {"status": "ready", "models": "validated"}
+        return {"status": "ready", "models": "validated", "precision": "bf16"}
 
     @modal.method()
     def generate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        import torch
+
         job_id = str(payload.get("job_id") or f"lipdub_{uuid.uuid4().hex[:12]}")
         webhook_url = payload.get("webhook_url")
         prompt = str(
@@ -288,6 +296,13 @@ class LipDubRunner:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
+            capability = torch.cuda.get_device_capability()
+            gpu_name = torch.cuda.get_device_name()
+            print(
+                f"[LTX-2.3 LipDub] GPU {gpu_name}, compute capability "
+                f"{capability[0]}.{capability[1]}; using native BF16 (FP8 disabled)."
+            )
+
             source_video = _write_media(payload, "video", work_dir)
             replacement_audio = _write_media(payload, "audio", work_dir)
             reference_video = work_dir / "reference-with-new-audio.mp4"
@@ -362,8 +377,6 @@ class LipDubRunner:
                     "768",
                     "--seed",
                     str(seed),
-                    "--quantization",
-                    "fp8-cast",
                     "--output-path",
                     str(output_path),
                 ],
