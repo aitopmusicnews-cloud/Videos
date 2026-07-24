@@ -11,6 +11,7 @@ import { TimelineDropzone } from "../components/TimelineDropzone.js";
 import { VideoPreview } from "../components/VideoPreview.js";
 import { Toasts } from "../components/Toasts.js";
 import { AutoDirector } from "../components/AutoDirector.js";
+import { DirectorReferenceChat } from "../components/DirectorReferenceChat.js";
 
 export function Editor() {
   const analysis = useStore((s) => s.analysis);
@@ -79,6 +80,7 @@ export function Editor() {
       <RightSidebar />
       {analysis ? <Timeline /> : <TimelineDropzone />}
       <AutoDirector />
+      <DirectorReferenceChat />
       <Toasts />
     </div>
   );
