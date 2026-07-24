@@ -9,6 +9,7 @@ import {
   patchDirectorAgentComponent,
   patchDirectorReferenceChat,
 } from "./director-agent-runtime-patch.mjs";
+import { patchDirectorSectionApprovals } from "./director-section-approval-patch.mjs";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sidebarPath = resolve(webRoot, "src/components/Sidebar.tsx");
@@ -86,7 +87,7 @@ const referenceListener = `  useEffect(() => {
         if (!current) return current;
         if (kind === "note") {
           const vision = note
-            ? [current.vision.trim(), note].filter(Boolean).join("\\n")
+            ? [current.vision.trim(), note].filter(Boolean).join("\n")
             : current.vision;
           return { ...current, vision };
         }
@@ -97,7 +98,7 @@ const referenceListener = `  useEffect(() => {
           : kind + " visual reference supplied";
         const mustInclude = [current.mustInclude.trim(), referenceLine]
           .filter(Boolean)
-          .join("\\n");
+          .join("\n");
 
         return {
           ...current,
@@ -176,7 +177,10 @@ patchedApi = replaceRequired(
 );
 
 const patchedScheduler = patchDirectorAgentRuntime(originalScheduler, replaceRequired);
-const patchedAgent = patchDirectorAgentComponent(originalAgent, replaceRequired);
+const patchedAgent = patchDirectorSectionApprovals(
+  patchDirectorAgentComponent(originalAgent, replaceRequired),
+  replaceRequired,
+);
 const patchedReferenceChat = patchDirectorReferenceChat(originalReferenceChat, replaceRequired);
 
 try {
@@ -198,7 +202,7 @@ try {
   await writeFile(schedulerPath, patchedScheduler, "utf8");
   await writeFile(agentPath, patchedAgent, "utf8");
   await writeFile(referenceChatPath, patchedReferenceChat, "utf8");
-  console.log("[web build] Enforced strict LTX agent conditioning and connected Reference Chat.");
+  console.log("[web build] Enforced strict LTX conditioning and sequential treatment, character, and analyzed-section approvals.");
 
   await run("tsc", ["--noEmit"]);
   await run("vite", ["build"]);
