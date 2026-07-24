@@ -4,11 +4,13 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { patchDirectorStatus } from "./director-status-patch.mjs";
 import { patchDirectorEditing } from "./director-edit-patch.mjs";
+import { patchDirectorAgentRuntime } from "./director-agent-runtime-patch.mjs";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sidebarPath = resolve(webRoot, "src/components/Sidebar.tsx");
 const directorPath = resolve(webRoot, "src/components/AutoDirector.tsx");
 const apiPath = resolve(webRoot, "src/lib/api.ts");
+const schedulerPath = resolve(webRoot, "src/lib/scheduler.ts");
 const inferredDeclaration = "  let percent = current.percent;";
 const numericDeclaration = "  let percent: number = current.percent;";
 
@@ -42,6 +44,7 @@ function replaceRequired(source, from, to, label) {
 const originalSidebar = await readFile(sidebarPath, "utf8");
 const originalDirector = await readFile(directorPath, "utf8");
 const originalApi = await readFile(apiPath, "utf8");
+const originalScheduler = await readFile(schedulerPath, "utf8");
 const needsNormalization = originalSidebar.includes(inferredDeclaration);
 
 if (!needsNormalization && !originalSidebar.includes(numericDeclaration)) {
@@ -49,60 +52,60 @@ if (!needsNormalization && !originalSidebar.includes(numericDeclaration)) {
 }
 
 const directorEffectAnchor = `  useEffect(() => {
-    if (!songId || !analysis || clips.length === 0) {`;
+     if (!songId || !analysis || clips.length === 0) {`;
 
 const referenceListener = `  useEffect(() => {
-    const receiveReference = (event: Event) => {
-      const detail = (event as CustomEvent<{
-        kind?: "character" | "style" | "location" | "shot" | "note";
-        media?: "image" | "video" | "note";
-        name?: string;
-        url?: string;
-        sourceUrl?: string;
-        note?: string;
-      }>).detail;
-      if (!detail) return;
+     const receiveReference = (event: Event) => {
+       const detail = (event as CustomEvent<{
+         kind?: "character" | "style" | "location" | "shot" | "note";
+         media?: "image" | "video" | "note";
+         name?: string;
+         url?: string;
+         sourceUrl?: string;
+         note?: string;
+       }>).detail;
+       if (!detail) return;
 
-      const kind = detail.kind ?? "style";
-      const note = String(detail.note ?? "").trim();
-      const name = String(detail.name ?? "reference").trim();
-      const anchorUrl = detail.url;
+       const kind = detail.kind ?? "style";
+       const note = String(detail.note ?? "").trim();
+       const name = String(detail.name ?? "reference").trim();
+       const anchorUrl = detail.url;
 
-      if (anchorUrl) addLookbook(anchorUrl);
-      if (kind === "character" && anchorUrl) setCharacter(anchorUrl);
+       if (anchorUrl) addLookbook(anchorUrl);
+       if (kind === "character" && anchorUrl) setCharacter(anchorUrl);
 
-      setSession((current) => {
-        if (!current) return current;
-        if (kind === "note") {
-          const vision = note
-            ? [current.vision.trim(), note].filter(Boolean).join("\\n")
-            : current.vision;
-          return { ...current, vision };
-        }
+       setSession((current) => {
+         if (!current) return current;
+         if (kind === "note") {
+           const vision = note
+             ? [current.vision.trim(), note].filter(Boolean).join("\\n")
+             : current.vision;
+           return { ...current, vision };
+         }
 
-        const description = note || name;
-        const referenceLine = description
-          ? kind + " reference: " + description
-          : kind + " visual reference supplied";
-        const mustInclude = [current.mustInclude.trim(), referenceLine]
-          .filter(Boolean)
-          .join("\\n");
+         const description = note || name;
+         const referenceLine = description
+           ? kind + " reference: " + description
+           : kind + " visual reference supplied";
+         const mustInclude = [current.mustInclude.trim(), referenceLine]
+           .filter(Boolean)
+           .join("\\n");
 
-        return {
-          ...current,
-          mustInclude,
-          characterUrl: kind === "character" && anchorUrl ? anchorUrl : current.characterUrl,
-          characterApproved: kind === "character" && anchorUrl ? false : current.characterApproved,
-        };
-      });
+         return {
+           ...current,
+           mustInclude,
+           characterUrl: kind === "character" && anchorUrl ? anchorUrl : current.characterUrl,
+           characterApproved: kind === "character" && anchorUrl ? false : current.characterApproved,
+         };
+       });
 
-      setDirectorError(null);
-      setOpen(true);
-    };
+       setDirectorError(null);
+       setOpen(true);
+     };
 
-    window.addEventListener("mvs-director-reference", receiveReference as EventListener);
-    return () => window.removeEventListener("mvs-director-reference", receiveReference as EventListener);
-  }, [addLookbook, setCharacter]);
+     window.addEventListener("mvs-director-reference", receiveReference as EventListener);
+     return () => window.removeEventListener("mvs-director-reference", receiveReference as EventListener);
+   }, [addLookbook, setCharacter]);
 
 ${directorEffectAnchor}`;
 
@@ -116,40 +119,40 @@ patchedDirector = patchDirectorStatus(patchedDirector, replaceRequired);
 patchedDirector = patchDirectorEditing(patchedDirector, replaceRequired);
 
 const oldApiErrorMessage = `    const msg = parsed?.error ?? text;
-    throw new ApiError(res.status, msg, parsed?.rateLimited === true);`;
+     throw new ApiError(res.status, msg, parsed?.rateLimited === true);`;
 
 const safeApiErrorMessage = `    const isHtml = /<!doctype|<html/i.test(text.slice(0, 300));
-    const msg = parsed?.error ?? (isHtml
-      ? (res.status >= 500
-          ? "The Render service is temporarily unavailable. Please try again."
-          : "The server returned an HTML error page instead of JSON.")
-      : text.slice(0, 500));
-    throw new ApiError(res.status, msg, parsed?.rateLimited === true);`;
+     const msg = parsed?.error ?? (isHtml
+       ? (res.status >= 500
+           ? "The Render service is temporarily unavailable. Please try again."
+           : "The server returned an HTML error page instead of JSON.")
+       : text.slice(0, 500));
+     throw new ApiError(res.status, msg, parsed?.rateLimited === true);`;
 
 const oldSliceAudio = `export async function sliceAudio(audioUrl: string, start: number, end: number): Promise<{ url: string }> {
-  return jsonOrThrow(
-    await fetch("/api/audio/slice", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ audioUrl, start, end }),
-    })
-  );
-}`;
+   return jsonOrThrow(
+     await fetch("/api/audio/slice", {
+       method: "POST",
+       headers: { "content-type": "application/json" },
+       body: JSON.stringify({ audioUrl, start, end }),
+     })
+   );
+ }`;
 
 const retryingSliceAudio = `export async function sliceAudio(audioUrl: string, start: number, end: number): Promise<{ url: string }> {
-  const request = () => fetch("/api/audio/slice", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ audioUrl, start, end }),
-  });
+   const request = () => fetch("/api/audio/slice", {
+     method: "POST",
+     headers: { "content-type": "application/json" },
+     body: JSON.stringify({ audioUrl, start, end }),
+   });
 
-  let response = await request();
-  if (response.status >= 500) {
-    await new Promise((resolveRetry) => setTimeout(resolveRetry, 2500));
-    response = await request();
-  }
-  return jsonOrThrow(response);
-}`;
+   let response = await request();
+   if (response.status >= 500) {
+     await new Promise((resolveRetry) => setTimeout(resolveRetry, 2500));
+     response = await request();
+   }
+   return jsonOrThrow(response);
+ }`;
 
 let patchedApi = replaceRequired(
   originalApi,
@@ -164,6 +167,8 @@ patchedApi = replaceRequired(
   "transient promo audio retry",
 );
 
+const patchedScheduler = patchDirectorAgentRuntime(originalScheduler, replaceRequired);
+
 try {
   if (needsNormalization) {
     await writeFile(
@@ -175,10 +180,13 @@ try {
   }
 
   await writeFile(directorPath, patchedDirector, "utf8");
-  console.log("[web build] Connected references, status bars, unlimited editing, and storyboard acceptance to Director.");
+  console.log("[web build] Kept legacy Director source build-compatible for saved sessions.");
 
   await writeFile(apiPath, patchedApi, "utf8");
   console.log("[web build] Added transient Render retry and safe API error messages.");
+
+  await writeFile(schedulerPath, patchedScheduler, "utf8");
+  console.log("[web build] Enforced strict character conditioning for LTX Director Agent jobs.");
 
   await run("tsc", ["--noEmit"]);
   await run("vite", ["build"]);
@@ -188,4 +196,5 @@ try {
   }
   await writeFile(directorPath, originalDirector, "utf8");
   await writeFile(apiPath, originalApi, "utf8");
+  await writeFile(schedulerPath, originalScheduler, "utf8");
 }
