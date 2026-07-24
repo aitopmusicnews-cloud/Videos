@@ -4,11 +4,17 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { patchDirectorStatus } from "./director-status-patch.mjs";
 import { patchDirectorEditing } from "./director-edit-patch.mjs";
-import { patchDirectorAgentRuntime } from "./director-agent-runtime-patch.mjs";
+import {
+  patchDirectorAgentRuntime,
+  patchDirectorAgentComponent,
+  patchDirectorReferenceChat,
+} from "./director-agent-runtime-patch.mjs";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sidebarPath = resolve(webRoot, "src/components/Sidebar.tsx");
 const directorPath = resolve(webRoot, "src/components/AutoDirector.tsx");
+const agentPath = resolve(webRoot, "src/components/LtxDirectorAgent.tsx");
+const referenceChatPath = resolve(webRoot, "src/components/DirectorReferenceChat.tsx");
 const apiPath = resolve(webRoot, "src/lib/api.ts");
 const schedulerPath = resolve(webRoot, "src/lib/scheduler.ts");
 const inferredDeclaration = "  let percent = current.percent;";
@@ -43,6 +49,8 @@ function replaceRequired(source, from, to, label) {
 
 const originalSidebar = await readFile(sidebarPath, "utf8");
 const originalDirector = await readFile(directorPath, "utf8");
+const originalAgent = await readFile(agentPath, "utf8");
+const originalReferenceChat = await readFile(referenceChatPath, "utf8");
 const originalApi = await readFile(apiPath, "utf8");
 const originalScheduler = await readFile(schedulerPath, "utf8");
 const needsNormalization = originalSidebar.includes(inferredDeclaration);
@@ -168,6 +176,8 @@ patchedApi = replaceRequired(
 );
 
 const patchedScheduler = patchDirectorAgentRuntime(originalScheduler, replaceRequired);
+const patchedAgent = patchDirectorAgentComponent(originalAgent, replaceRequired);
+const patchedReferenceChat = patchDirectorReferenceChat(originalReferenceChat, replaceRequired);
 
 try {
   if (needsNormalization) {
@@ -186,7 +196,9 @@ try {
   console.log("[web build] Added transient Render retry and safe API error messages.");
 
   await writeFile(schedulerPath, patchedScheduler, "utf8");
-  console.log("[web build] Enforced strict character conditioning for LTX Director Agent jobs.");
+  await writeFile(agentPath, patchedAgent, "utf8");
+  await writeFile(referenceChatPath, patchedReferenceChat, "utf8");
+  console.log("[web build] Enforced strict LTX agent conditioning and connected Reference Chat.");
 
   await run("tsc", ["--noEmit"]);
   await run("vite", ["build"]);
@@ -195,6 +207,8 @@ try {
     await writeFile(sidebarPath, originalSidebar, "utf8");
   }
   await writeFile(directorPath, originalDirector, "utf8");
+  await writeFile(agentPath, originalAgent, "utf8");
+  await writeFile(referenceChatPath, originalReferenceChat, "utf8");
   await writeFile(apiPath, originalApi, "utf8");
   await writeFile(schedulerPath, originalScheduler, "utf8");
 }
