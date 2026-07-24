@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const apiRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const serverPath = resolve(apiRoot, "src/server.ts");
 const modalAiPath = resolve(apiRoot, "src/modalAI.ts");
+const directorAgentPath = resolve(apiRoot, "src/director_agent.ts");
 
 function run(command, args) {
   return new Promise((resolveRun, rejectRun) => {
@@ -32,6 +33,7 @@ function replaceRequired(source, from, to, label) {
 
 const originalServer = await readFile(serverPath, "utf8");
 const originalModalAi = await readFile(modalAiPath, "utf8");
+const originalDirectorAgent = await readFile(directorAgentPath, "utf8");
 
 let patchedServer = replaceRequired(
   originalServer,
@@ -96,12 +98,34 @@ patchedModalAi = replaceRequired(
   "character requirement Modal payload",
 );
 
+const patchedDirectorAgent = replaceRequired(
+  originalDirectorAgent,
+  `      generationConfig: {
+        temperature: 0.35,
+        maxOutputTokens: 32768,
+        responseFormat: {
+          text: {
+            mimeType: "application/json",
+            schema: RESPONSE_SCHEMA,
+          },
+        },
+      },`,
+  `      generationConfig: {
+        maxOutputTokens: 32768,
+        responseMimeType: "application/json",
+        responseJsonSchema: RESPONSE_SCHEMA,
+      },`,
+  "Gemini generateContent structured output configuration",
+);
+
 try {
   await writeFile(serverPath, patchedServer, "utf8");
   await writeFile(modalAiPath, patchedModalAi, "utf8");
-  console.log("[api build] Wired Gemini LTX Director route and strict character conditioning.");
+  await writeFile(directorAgentPath, patchedDirectorAgent, "utf8");
+  console.log("[api build] Wired Gemini LTX Director route, compatible structured JSON output, and strict character conditioning.");
   await run("tsc", ["-p", "tsconfig.json"]);
 } finally {
   await writeFile(serverPath, originalServer, "utf8");
   await writeFile(modalAiPath, originalModalAi, "utf8");
+  await writeFile(directorAgentPath, originalDirectorAgent, "utf8");
 }
