@@ -13,6 +13,72 @@ import { toast } from "../lib/toast.js";
 
 type LtxSource = "textToVideo" | "imageToVideo" | "continue";
 
+type LipSyncProgress = {
+  percent: number;
+  stage: number;
+  totalStages: number;
+  title: string;
+  detail: string;
+  status: "running" | "complete" | "failed";
+};
+
+const LIP_SYNC_STAGES = [
+  {
+    afterMs: 0,
+    percent: 5,
+    title: "Submitting LipDub job",
+    detail: "Sending the performance clip and matching song section to Render.",
+  },
+  {
+    afterMs: 3_000,
+    percent: 12,
+    title: "Starting Modal GPU",
+    detail: "Waiting for an A100 worker and validating the cached LTX-2.3 models.",
+  },
+  {
+    afterMs: 20_000,
+    percent: 24,
+    title: "Preparing media",
+    detail: "Reading the source clip and slicing the exact matching section of the song.",
+  },
+  {
+    afterMs: 45_000,
+    percent: 36,
+    title: "Loading Gemma",
+    detail: "Building the text encoder and creating prompt conditioning.",
+  },
+  {
+    afterMs: 90_000,
+    percent: 50,
+    title: "Analyzing the performance",
+    detail: "Encoding the face, mouth movement, reference video, and replacement audio.",
+  },
+  {
+    afterMs: 150_000,
+    percent: 64,
+    title: "LipDub generation · pass 1",
+    detail: "Generating synchronized facial and mouth movement from the vocal performance.",
+  },
+  {
+    afterMs: 300_000,
+    percent: 78,
+    title: "LipDub generation · pass 2",
+    detail: "Refining identity, motion, timing, and temporal consistency.",
+  },
+  {
+    afterMs: 480_000,
+    percent: 90,
+    title: "Rendering the video",
+    detail: "Decoding frames, combining the synchronized audio, and writing the MP4.",
+  },
+  {
+    afterMs: 720_000,
+    percent: 96,
+    title: "Finalizing",
+    detail: "Uploading the finished clip and waiting for the completion callback.",
+  },
+] as const;
+
 const SOURCES: Array<{ value: LtxSource; label: string; desc: string }> = [
   {
     value: "textToVideo",
@@ -54,6 +120,34 @@ function taskOutputUrl(task: Task): string | undefined {
   return task.output?.videoUrl ?? task.output?.imageUrl ?? task.output?.url;
 }
 
+function estimatedLipSyncProgress(elapsedMs: number): LipSyncProgress {
+  let index = 0;
+  for (let i = 1; i < LIP_SYNC_STAGES.length; i += 1) {
+    if (elapsedMs >= LIP_SYNC_STAGES[i]!.afterMs) index = i;
+    else break;
+  }
+
+  const current = LIP_SYNC_STAGES[index]!;
+  const next = LIP_SYNC_STAGES[index + 1];
+  let percent = current.percent;
+  if (next) {
+    const span = Math.max(1, next.afterMs - current.afterMs);
+    const fraction = Math.min(1, Math.max(0, (elapsedMs - current.afterMs) / span));
+    percent = Math.min(next.percent - 1, Math.round(current.percent + fraction * (next.percent - current.percent)));
+  } else {
+    percent = Math.min(98, current.percent + Math.floor((elapsedMs - current.afterMs) / 120_000));
+  }
+
+  return {
+    percent,
+    stage: index + 1,
+    totalStages: LIP_SYNC_STAGES.length,
+    title: current.title,
+    detail: current.detail,
+    status: "running",
+  };
+}
+
 export function Sidebar() {
   const selectedId = useStore((s) => s.selectedClipId);
   const clips = useStore((s) => s.clips);
@@ -67,6 +161,7 @@ export function Sidebar() {
   const [creatingCharacter, setCreatingCharacter] = useState(false);
   const [characterPrompt, setCharacterPrompt] = useState("");
   const [lipSyncing, setLipSyncing] = useState(false);
+  const [lipSyncProgress, setLipSyncProgress] = useState<LipSyncProgress | null>(null);
   const [referenceStrength, setReferenceStrength] = useState(1);
   const clip = useMemo(() => clips.find((c) => c.id === selectedId) ?? null, [clips, selectedId]);
   const source = normalizeSource(clip?.source ?? "textToVideo");
@@ -166,7 +261,14 @@ export function Sidebar() {
 
     const referenceVideoUrl = clip.videoUrl;
     const previousSource = clip.source;
+    const startedAt = Date.now();
+    let progressTimer: ReturnType<typeof setInterval> | null = null;
     setLipSyncing(true);
+    setLipSyncProgress(estimatedLipSyncProgress(0));
+    progressTimer = setInterval(() => {
+      setLipSyncProgress(estimatedLipSyncProgress(Date.now() - startedAt));
+    }, 1000);
+
     try {
       toast.info("Preparing the matching song segment for LipDub…");
       updateClip(clip.id, {
@@ -192,6 +294,14 @@ export function Sidebar() {
         throw new Error(final.error ?? `LipDub ended in ${final.status}`);
       }
 
+      setLipSyncProgress({
+        percent: 100,
+        stage: LIP_SYNC_STAGES.length,
+        totalStages: LIP_SYNC_STAGES.length,
+        title: "LipDub complete",
+        detail: "The synchronized performance clip is ready to preview and save.",
+        status: "complete",
+      });
       updateClip(clip.id, {
         videoUrl: outputUrl,
         source: "lipSync",
@@ -203,6 +313,14 @@ export function Sidebar() {
       toast.success("LTX-2.3 LipDub clip ready");
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      setLipSyncProgress((current) => ({
+        percent: current?.percent ?? 0,
+        stage: current?.stage ?? 1,
+        totalStages: LIP_SYNC_STAGES.length,
+        title: "LipDub failed",
+        detail: reason,
+        status: "failed",
+      }));
       updateClip(clip.id, {
         videoUrl: referenceVideoUrl,
         source: previousSource,
@@ -212,6 +330,7 @@ export function Sidebar() {
       });
       toast.error(`Lip-sync failed: ${reason.slice(0, 140)}`);
     } finally {
+      if (progressTimer) clearInterval(progressTimer);
       setLipSyncing(false);
     }
   };
@@ -236,6 +355,8 @@ export function Sidebar() {
       : source === "imageToVideo"
         ? "Motion + audio prompt"
         : "Continuation + audio prompt";
+
+  const showLipSyncPanel = !!clip.videoUrl && (clip.status === "ready" || lipSyncing);
 
   return (
     <>
@@ -361,7 +482,7 @@ export function Sidebar() {
         </div>
       </div>
 
-      {clip.status === "ready" && clip.videoUrl && (
+      {showLipSyncPanel && (
         <div className="option-group">
           <div className="label">Performance lip-sync</div>
           <div className="select-desc">
@@ -376,7 +497,66 @@ export function Sidebar() {
             step="0.05"
             value={referenceStrength}
             onChange={(e) => setReferenceStrength(Number(e.target.value))}
+            disabled={lipSyncing}
           />
+
+          {lipSyncProgress && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={{
+                marginTop: 12,
+                padding: 12,
+                border: "1px solid rgba(255,255,255,0.12)",
+                borderRadius: 10,
+                background: "rgba(255,255,255,0.035)",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 12 }}>
+                <strong>
+                  {lipSyncProgress.status === "complete"
+                    ? "Complete"
+                    : lipSyncProgress.status === "failed"
+                      ? `Stopped at stage ${lipSyncProgress.stage}`
+                      : `Stage ${lipSyncProgress.stage} of ${lipSyncProgress.totalStages}`}
+                </strong>
+                <span>{lipSyncProgress.percent}%</span>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 13, fontWeight: 700 }}>{lipSyncProgress.title}</div>
+              <div
+                style={{
+                  height: 8,
+                  marginTop: 10,
+                  overflow: "hidden",
+                  borderRadius: 999,
+                  background: "rgba(255,255,255,0.1)",
+                }}
+              >
+                <div
+                  style={{
+                    width: `${lipSyncProgress.percent}%`,
+                    height: "100%",
+                    borderRadius: 999,
+                    background: lipSyncProgress.status === "failed"
+                      ? "#ef4444"
+                      : lipSyncProgress.status === "complete"
+                        ? "#22c55e"
+                        : "linear-gradient(90deg, #6366f1, #a855f7)",
+                    transition: "width 700ms ease",
+                  }}
+                />
+              </div>
+              <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.45, opacity: 0.72 }}>
+                {lipSyncProgress.detail}
+              </div>
+              {lipSyncProgress.status === "running" && (
+                <div style={{ marginTop: 6, fontSize: 10, opacity: 0.5 }}>
+                  Estimated stage based on elapsed processing time. Completion is confirmed by the Modal callback.
+                </div>
+              )}
+            </div>
+          )}
+
           <button
             type="button"
             className="generate-btn"
@@ -439,6 +619,7 @@ export function Sidebar() {
                 generationTaskId: undefined,
                 lastError: undefined,
               });
+              setLipSyncProgress(null);
             }}
           >
             Clear clip
