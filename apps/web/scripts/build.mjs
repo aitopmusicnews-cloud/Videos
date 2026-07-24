@@ -78,8 +78,8 @@ const referenceListener = `  useEffect(() => {
 
         const description = note || name;
         const referenceLine = description
-          ? \\`\${kind} reference: \${description}\\`
-          : \\`\${kind} visual reference supplied\\`;
+          ? kind + " reference: " + description
+          : kind + " visual reference supplied";
         const mustInclude = [current.mustInclude.trim(), referenceLine]
           .filter(Boolean)
           .join("\\n");
@@ -102,7 +102,7 @@ const referenceListener = `  useEffect(() => {
 
 ${directorEffectAnchor}`;
 
-let patchedDirector = replaceRequired(
+const patchedDirector = replaceRequired(
   originalDirector,
   directorEffectAnchor,
   referenceListener,
