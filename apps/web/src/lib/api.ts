@@ -45,6 +45,22 @@ async function jsonOrThrow<T>(res: Response): Promise<T> {
   }
 }
 
+/**
+ * Library endpoints historically returned raw arrays, while the current API
+ * returns named envelopes such as { clips: [...] }. Accept both formats so an
+ * older browser bundle or a newer server cannot crash the Library with
+ * "filter is not a function".
+ */
+function arrayFromPayload<T>(payload: unknown, key: string): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (payload && typeof payload === "object") {
+    const nested = (payload as Record<string, unknown>)[key];
+    if (Array.isArray(nested)) return nested as T[];
+  }
+  console.warn(`[API] Expected an array or { ${key}: [...] } response`, payload);
+  return [];
+}
+
 export async function uploadSong(file: File): Promise<{ id: string; audioUrl: string; filename: string }> {
   const fd = new FormData();
   fd.append("file", file);
@@ -141,7 +157,14 @@ export async function startTextToVideo(req: Record<string, any>): Promise<{ id: 
 export async function ensureVocalStem(songIdOrUrl: string): Promise<{ url: string; vocalUrl: string }> {
   try {
     const res = await jsonOrThrow<{ url?: string; vocalUrl?: string }>(
-      await fetch(`/api/songs/${encodeURIComponent(songIdOrUrl)}/vocal-stem`, { method: "POST" })
+      await fetch("/api/songs/vocal-stem", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          songId: songIdOrUrl.startsWith("http") || songIdOrUrl.startsWith("/") ? undefined : songIdOrUrl,
+          audioUrl: songIdOrUrl,
+        }),
+      })
     );
     const u = res.url || res.vocalUrl || songIdOrUrl;
     return { url: u, vocalUrl: u };
@@ -202,7 +225,7 @@ export async function renderTimeline(
   options?: { onUpdate?: (job: RenderJob) => void }
 ): Promise<{ url: string; renderId: string }> {
   const submitRes = await jsonOrThrow<RenderSubmitResponse>(
-    await fetch("/api/renders", {
+    await fetch("/api/render", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(req),
@@ -210,21 +233,15 @@ export async function renderTimeline(
   );
   const start = Date.now();
   while (Date.now() - start < 600_000) {
-    try {
-      const job = await jsonOrThrow<RenderJob>(await fetch(`/api/renders/${submitRes.renderId}`));
-      options?.onUpdate?.(job);
-      if (job.state === "succeeded") {
-        return { url: job.url ?? `/storage/renders/${submitRes.renderId}.mp4`, renderId: submitRes.renderId };
-      }
-      if (job.state === "failed") {
-        throw new Error(job.error ?? "render failed");
-      }
-    } catch (e: any) {
-      if (e instanceof ApiError && e.status === 404) {
-        // Render completed directly
-        return { url: `/storage/renders/${submitRes.renderId}.mp4`, renderId: submitRes.renderId };
-      }
-      throw e;
+    const job = await jsonOrThrow<RenderJob>(
+      await fetch(`/api/render/jobs/${encodeURIComponent(submitRes.renderId)}`)
+    );
+    options?.onUpdate?.(job);
+    if (job.state === "succeeded") {
+      return { url: job.url ?? `/storage/renders/${submitRes.renderId}.mp4`, renderId: submitRes.renderId };
+    }
+    if (job.state === "failed") {
+      throw new Error(job.error ?? "render failed");
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
@@ -232,7 +249,7 @@ export async function renderTimeline(
 }
 
 export async function saveProjectToServer(id: string, name: string, snapshot: Record<string, unknown>): Promise<ProjectMeta> {
-  return jsonOrThrow(await fetch("/api/projects", {
+  return jsonOrThrow(await fetch("/api/projects/save", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, name, state: snapshot }),
@@ -240,23 +257,27 @@ export async function saveProjectToServer(id: string, name: string, snapshot: Re
 }
 
 export async function listProjects(): Promise<ProjectMeta[]> {
-  return jsonOrThrow(await fetch("/api/projects"));
+  const payload = await jsonOrThrow<unknown>(await fetch("/api/projects"));
+  return arrayFromPayload<ProjectMeta>(payload, "projects");
 }
 
 export async function loadProjectFromServer(id: string): Promise<SavedProject> {
-  return jsonOrThrow(await fetch(`/api/projects/${id}`));
+  return jsonOrThrow(await fetch(`/api/projects/${encodeURIComponent(id)}`));
 }
 
 export async function deleteProjectOnServer(id: string): Promise<void> {
-  await fetch(`/api/projects/${id}`, { method: "DELETE" });
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) await jsonOrThrow(res);
 }
 
 export async function listRenders(): Promise<RenderEntry[]> {
-  return jsonOrThrow(await fetch("/api/renders"));
+  const payload = await jsonOrThrow<unknown>(await fetch("/api/library/renders"));
+  return arrayFromPayload<RenderEntry>(payload, "renders");
 }
 
 export async function listSavedClips(): Promise<SavedClip[]> {
-  return jsonOrThrow(await fetch("/api/clips"));
+  const payload = await jsonOrThrow<unknown>(await fetch("/api/clips"));
+  return arrayFromPayload<SavedClip>(payload, "clips");
 }
 
 export async function saveClipToServer(clip: Partial<SavedClip> & { id: string; name: string; videoUrl: string; source: string; duration: number }): Promise<SavedClip> {
@@ -268,15 +289,17 @@ export async function saveClipToServer(clip: Partial<SavedClip> & { id: string; 
 }
 
 export async function deleteClipOnServer(id: string): Promise<void> {
-  await fetch(`/api/clips/${id}`, { method: "DELETE" });
+  const res = await fetch(`/api/clips/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) await jsonOrThrow(res);
 }
 
 export async function listSavedImages(): Promise<SavedImage[]> {
-  return jsonOrThrow(await fetch("/api/images"));
+  const payload = await jsonOrThrow<unknown>(await fetch("/api/library/images"));
+  return arrayFromPayload<SavedImage>(payload, "images");
 }
 
 export async function saveImageToLibrary(img: Partial<SavedImage> & { id: string; name: string; url: string; source: string }): Promise<SavedImage> {
-  return jsonOrThrow(await fetch("/api/images", {
+  return jsonOrThrow(await fetch("/api/library/images/save", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(img),
@@ -284,16 +307,19 @@ export async function saveImageToLibrary(img: Partial<SavedImage> & { id: string
 }
 
 export async function deleteImageFromLibrary(id: string): Promise<void> {
-  await fetch(`/api/images/${id}`, { method: "DELETE" });
+  const res = await fetch(`/api/library/images/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) await jsonOrThrow(res);
 }
 
 export async function listLibraryFolders(type?: "clips" | "images"): Promise<LibraryFolder[]> {
-  const url = type ? `/api/folders?type=${type}` : "/api/folders";
-  return jsonOrThrow(await fetch(url));
+  const query = type ? `?type=${encodeURIComponent(type)}` : "";
+  const payload = await jsonOrThrow<unknown>(await fetch(`/api/library/folders${query}`));
+  const folders = arrayFromPayload<LibraryFolder>(payload, "folders");
+  return type ? folders.filter((folder) => folder.type === type) : folders;
 }
 
 export async function saveLibraryFolder(folder: { id: string; name: string; parentId: string | null; type: "clips" | "images" }): Promise<LibraryFolder> {
-  return jsonOrThrow(await fetch("/api/folders", {
+  return jsonOrThrow(await fetch("/api/library/folders/save", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(folder),
@@ -301,7 +327,8 @@ export async function saveLibraryFolder(folder: { id: string; name: string; pare
 }
 
 export async function deleteLibraryFolder(id: string): Promise<void> {
-  await fetch(`/api/folders/${id}`, { method: "DELETE" });
+  const res = await fetch(`/api/library/folders/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) await jsonOrThrow(res);
 }
 
 export interface AvatarSummary {
@@ -330,9 +357,10 @@ export async function createAvatar(fileOrUrl: File | string, name: string): Prom
 }
 
 export async function pollAvatar(id: string): Promise<AvatarSummary> {
-  return jsonOrThrow(await fetch(`/api/avatars/${id}`));
+  return jsonOrThrow(await fetch(`/api/avatars/${encodeURIComponent(id)}`));
 }
 
 export async function listAvatars(): Promise<AvatarSummary[]> {
-  return jsonOrThrow(await fetch("/api/avatars"));
+  const payload = await jsonOrThrow<unknown>(await fetch("/api/avatars"));
+  return arrayFromPayload<AvatarSummary>(payload, "avatars");
 }
