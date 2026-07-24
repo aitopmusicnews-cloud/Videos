@@ -68,10 +68,14 @@ lipdub_image = (
         "huggingface_hub>=0.36.0",
         "hf_xet>=1.1.0",
         "safetensors>=0.5.0",
+        # LTX Core requires torch~=2.7. Torchvision 0.22 is the matching
+        # release line and is required by Transformers AutoImageProcessor.
+        "torchvision~=0.22.0",
     )
     .run_commands(
         "git clone --depth 1 https://github.com/Lightricks/LTX-2.git /opt/LTX-2",
         "cd /opt/LTX-2 && uv pip install --system -e packages/ltx-core -e packages/ltx-pipelines",
+        "python -c \"import torch, torchvision; from transformers import AutoImageProcessor; print('torch', torch.__version__, 'torchvision', torchvision.__version__)\"",
     )
     .env(
         {
