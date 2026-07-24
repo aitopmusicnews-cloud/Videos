@@ -112,17 +112,21 @@ const patchedDirectorAgent = replaceRequired(
       },`,
   `      generationConfig: {
         maxOutputTokens: 32768,
-        responseMimeType: "application/json",
-        responseJsonSchema: RESPONSE_SCHEMA,
+        responseFormat: {
+          text: {
+            mimeType: "APPLICATION_JSON",
+            schema: RESPONSE_SCHEMA,
+          },
+        },
       },`,
-  "Gemini generateContent structured output configuration",
+  "Gemini 3.6 structured output enum configuration",
 );
 
 try {
   await writeFile(serverPath, patchedServer, "utf8");
   await writeFile(modalAiPath, patchedModalAi, "utf8");
   await writeFile(directorAgentPath, patchedDirectorAgent, "utf8");
-  console.log("[api build] Wired Gemini LTX Director route, compatible structured JSON output, and strict character conditioning.");
+  console.log("[api build] Wired Gemini LTX Director route, Gemini 3.6 JSON response format, and strict character conditioning.");
   await run("tsc", ["-p", "tsconfig.json"]);
 } finally {
   await writeFile(serverPath, originalServer, "utf8");
