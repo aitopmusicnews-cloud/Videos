@@ -71,3 +71,37 @@ export function patchDirectorAgentRuntime(source, replaceRequired) {
 
   return patched;
 }
+
+export function patchDirectorAgentComponent(source, replaceRequired) {
+  return replaceRequired(
+    source,
+    `  const updateCharacterBible = (key: keyof CharacterBible, value: CharacterBible[keyof CharacterBible]) => {`,
+    `  const updateCharacterBible = <K extends keyof CharacterBible,>(key: K, value: CharacterBible[K]) => {`,
+    "typed character bible editor",
+  );
+}
+
+export function patchDirectorReferenceChat(source, replaceRequired) {
+  return replaceRequired(
+    source,
+    `  useEffect(() => {
+    if (!songId) return;
+    localStorage.setItem(storageKey(songId), JSON.stringify(items));
+  }, [items, songId]);
+
+  if (!songId) return null;`,
+    `  useEffect(() => {
+    if (!songId) return;
+    localStorage.setItem(storageKey(songId), JSON.stringify(items));
+  }, [items, songId]);
+
+  useEffect(() => {
+    const openFromDirector = () => setOpen(true);
+    window.addEventListener("mvs-open-reference-chat", openFromDirector);
+    return () => window.removeEventListener("mvs-open-reference-chat", openFromDirector);
+  }, []);
+
+  if (!songId) return null;`,
+    "open Reference Chat from LTX Director Agent",
+  );
+}
