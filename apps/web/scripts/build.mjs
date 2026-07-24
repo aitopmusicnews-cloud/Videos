@@ -11,6 +11,7 @@ import {
 } from "./director-agent-runtime-patch.mjs";
 import { patchDirectorSectionApprovals } from "./director-section-approval-patch.mjs";
 import { patchDirectorPreviewApprovals } from "./director-preview-approval-patch.mjs";
+import { repairDirectorPreviewPatch } from "./director-preview-repair-patch.mjs";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sidebarPath = resolve(webRoot, "src/components/Sidebar.tsx");
@@ -182,7 +183,10 @@ const stagedAgent = patchDirectorSectionApprovals(
   patchDirectorAgentComponent(originalAgent, replaceRequired),
   replaceRequired,
 );
-const patchedAgent = patchDirectorPreviewApprovals(stagedAgent, replaceRequired);
+const patchedAgent = repairDirectorPreviewPatch(
+  patchDirectorPreviewApprovals(stagedAgent, replaceRequired),
+  replaceRequired,
+);
 const patchedReferenceChat = patchDirectorReferenceChat(originalReferenceChat, replaceRequired);
 
 try {
