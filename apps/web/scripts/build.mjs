@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sidebarPath = resolve(webRoot, "src/components/Sidebar.tsx");
 const directorPath = resolve(webRoot, "src/components/AutoDirector.tsx");
+const apiPath = resolve(webRoot, "src/lib/api.ts");
 const inferredDeclaration = "  let percent = current.percent;";
 const numericDeclaration = "  let percent: number = current.percent;";
 
@@ -38,6 +39,7 @@ function replaceRequired(source, from, to, label) {
 
 const originalSidebar = await readFile(sidebarPath, "utf8");
 const originalDirector = await readFile(directorPath, "utf8");
+const originalApi = await readFile(apiPath, "utf8");
 const needsNormalization = originalSidebar.includes(inferredDeclaration);
 
 if (!needsNormalization && !originalSidebar.includes(numericDeclaration)) {
@@ -109,6 +111,55 @@ const patchedDirector = replaceRequired(
   "Director reference chat listener",
 );
 
+const oldApiErrorMessage = `    const msg = parsed?.error ?? text;
+    throw new ApiError(res.status, msg, parsed?.rateLimited === true);`;
+
+const safeApiErrorMessage = `    const isHtml = /<!doctype|<html/i.test(text.slice(0, 300));
+    const msg = parsed?.error ?? (isHtml
+      ? (res.status >= 500
+          ? "The Render service is temporarily unavailable. Please try again."
+          : "The server returned an HTML error page instead of JSON.")
+      : text.slice(0, 500));
+    throw new ApiError(res.status, msg, parsed?.rateLimited === true);`;
+
+const oldSliceAudio = `export async function sliceAudio(audioUrl: string, start: number, end: number): Promise<{ url: string }> {
+  return jsonOrThrow(
+    await fetch("/api/audio/slice", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ audioUrl, start, end }),
+    })
+  );
+}`;
+
+const retryingSliceAudio = `export async function sliceAudio(audioUrl: string, start: number, end: number): Promise<{ url: string }> {
+  const request = () => fetch("/api/audio/slice", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ audioUrl, start, end }),
+  });
+
+  let response = await request();
+  if (response.status >= 500) {
+    await new Promise((resolveRetry) => setTimeout(resolveRetry, 2500));
+    response = await request();
+  }
+  return jsonOrThrow(response);
+}`;
+
+let patchedApi = replaceRequired(
+  originalApi,
+  oldApiErrorMessage,
+  safeApiErrorMessage,
+  "safe HTML API error message",
+);
+patchedApi = replaceRequired(
+  patchedApi,
+  oldSliceAudio,
+  retryingSliceAudio,
+  "transient promo audio retry",
+);
+
 try {
   if (needsNormalization) {
     await writeFile(
@@ -122,6 +173,9 @@ try {
   await writeFile(directorPath, patchedDirector, "utf8");
   console.log("[web build] Connected reference chat to the Director session.");
 
+  await writeFile(apiPath, patchedApi, "utf8");
+  console.log("[web build] Added transient Render retry and safe API error messages.");
+
   await run("tsc", ["--noEmit"]);
   await run("vite", ["build"]);
 } finally {
@@ -129,4 +183,5 @@ try {
     await writeFile(sidebarPath, originalSidebar, "utf8");
   }
   await writeFile(directorPath, originalDirector, "utf8");
+  await writeFile(apiPath, originalApi, "utf8");
 }
