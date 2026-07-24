@@ -2,7 +2,7 @@ import { copyFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, basename } from "node:path";
 import { config } from "./config.js";
-import { ensureDir, storage } from "./storage.js";
+import { ensureDir, playableUrl, storage } from "./storage.js";
 import { resolveLocalPath } from "./paths.js";
 import type { ProjectMeta, SavedProject } from "@mvs/shared";
 
@@ -15,10 +15,6 @@ export async function saveProject(
   name: string,
   state: Record<string, unknown>,
 ): Promise<ProjectMeta> {
-  // In local-backend dev mode we additionally snapshot referenced local files
-  // into the project's folder so the saved project keeps working even if the
-  // ephemeral upload is cleaned up. In s3-backend mode every referenced URL
-  // is already on durable storage (rehosted) so we just persist the metadata.
   const copiedFiles = new Map<string, string>();
   if (config.STORAGE_BACKEND === "local") {
     const dir = join(config.STORAGE_DIR, "projects", id);
@@ -58,7 +54,10 @@ export async function saveProject(
   };
 
   await storage.saveJson(projectMetaKey(id), saved);
-  return meta;
+  return {
+    ...meta,
+    thumbnailUrl: meta.thumbnailUrl ? await playableUrl(meta.thumbnailUrl) : undefined,
+  };
 }
 
 export async function listProjects(): Promise<ProjectMeta[]> {
@@ -78,9 +77,11 @@ export async function listProjects(): Promise<ProjectMeta[]> {
         id,
         name,
         savedAt,
-        thumbnailUrl,
+        thumbnailUrl: thumbnailUrl ? await playableUrl(thumbnailUrl) : undefined,
       });
-    } catch { /* skip corrupt */ }
+    } catch {
+      // Skip corrupt or inaccessible project entries.
+    }
   }
 
   metas.sort((a, b) => (b.savedAt ?? "").localeCompare(a.savedAt ?? ""));
@@ -88,12 +89,13 @@ export async function listProjects(): Promise<ProjectMeta[]> {
 }
 
 export async function loadProject(id: string): Promise<SavedProject | null> {
-  return storage.loadJson<SavedProject>(projectMetaKey(id));
+  const saved = await storage.loadJson<SavedProject>(projectMetaKey(id));
+  if (!saved) return null;
+  return refreshMediaUrls(saved) as Promise<SavedProject>;
 }
 
 export async function deleteProject(id: string): Promise<boolean> {
   const existed = await storage.deleteJson(projectMetaKey(id));
-  // Clean up the on-disk files snapshot we made in local-backend mode.
   if (config.STORAGE_BACKEND === "local") {
     const dir = join(config.STORAGE_DIR, "projects", id);
     if (existsSync(dir)) await rm(dir, { recursive: true, force: true });
@@ -153,4 +155,16 @@ function rewriteUrls(obj: JsonMutable, map: Map<string, string>): void {
       }
     }
   }
+}
+
+async function refreshMediaUrls(value: JsonMutable): Promise<JsonMutable> {
+  if (typeof value === "string") return playableUrl(value);
+  if (Array.isArray(value)) return Promise.all(value.map(refreshMediaUrls));
+  if (value && typeof value === "object") {
+    const entries = await Promise.all(
+      Object.entries(value).map(async ([key, item]) => [key, await refreshMediaUrls(item)] as const)
+    );
+    return Object.fromEntries(entries) as { [key: string]: JsonMutable };
+  }
+  return value;
 }
