@@ -2,24 +2,21 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useStore } from "../lib/store.js";
 import type { Clip } from "@mvs/shared";
 import { useJobPolling } from "../../hooks/useJobPolling";
+import { listSavedClips } from "../lib/api.js";
 
 type StoreState = ReturnType<typeof useStore.getState>;
 
 /**
  * Double-buffered video preview. Two <video> elements alternate so the next
  * clip can preload while the current one plays — no black flash at boundaries.
- *
- * Visibility is driven by React state (`frontSlot`) rather than imperative
- * `style.display` mutations: the latter conflicts with React's style prop and
- * leaves the DOM in a state React can stomp on a later render.
  */
 export function VideoPreview() {
   const aRef = useRef<HTMLVideoElement>(null);
   const bRef = useRef<HTMLVideoElement>(null);
   const [frontSlot, setFrontSlot] = useState<"a" | "b">("a");
-  /** Composite key (id + url) loaded in each slot. Tracks both so a rehosted
-   * URL triggers a reload even though the clip ID stays the same. */
   const loadedRef = useRef<{ a: string | null; b: string | null }>({ a: null, b: null });
+  const recoveredOnMountRef = useRef(false);
+  const repairRequestsRef = useRef(new Set<string>());
 
   const clips = useStore((s: StoreState) => s.clips);
   const playhead = useStore((s: StoreState) => s.playhead);
@@ -27,60 +24,94 @@ export function VideoPreview() {
   const selectedClipId = useStore((s: StoreState) => s.selectedClipId);
   const updateClip = useStore((s: StoreState) => s.updateClip);
 
-  // Find standard clips to assist status polling overlays
   const selectedClip = clips.find((c) => c.id === selectedClipId) ?? null;
   const playheadClip = clips.find((c) => playhead >= c.start && playhead < c.end) ?? null;
-
-  // Prioritize polling on playheadClip if it is currently rendering, otherwise selected clip
-  const targetClip = (playheadClip?.generationTaskId) ? playheadClip : selectedClip;
+  const targetClip = playheadClip?.generationTaskId ? playheadClip : selectedClip;
   const activeJobId = targetClip?.generationTaskId;
 
-  // Bind the real-time background job polling hook
   const { status: pollStatus } = useJobPolling({
     jobId: activeJobId,
     intervalMs: 3000,
     onSuccess: (completedUrl: string) => {
       if (targetClip) {
-        const patch: any = {
+        updateClip(targetClip.id, {
           videoUrl: completedUrl,
           status: "ready",
           generationTaskId: undefined,
           lastError: undefined,
-        };
-        updateClip(targetClip.id, patch);
+        });
       }
     },
     onFailure: (errMsg: string) => {
       if (targetClip) {
-        const patch: any = {
+        updateClip(targetClip.id, {
           status: "failed",
           lastError: errMsg,
           generationTaskId: undefined,
-        };
-        updateClip(targetClip.id, patch);
+        });
       }
     },
   });
 
-  // Sync back to general clip store generation state
   useEffect(() => {
     if (targetClip && pollStatus === "pending" && targetClip.status !== "generating") {
-      const patch: any = { status: "generating" };
-      updateClip(targetClip.id, patch);
+      updateClip(targetClip.id, { status: "generating" });
     }
   }, [pollStatus, targetClip, updateClip]);
+
+  // Repair URLs already persisted in this browser. The clips API refreshes
+  // private-S3 links on every read, so old unsigned or expired links become
+  // playable without forcing the user to regenerate the clip.
+  useEffect(() => {
+    if (recoveredOnMountRef.current) return;
+    recoveredOnMountRef.current = true;
+    let cancelled = false;
+
+    void listSavedClips()
+      .then((savedClips) => {
+        if (cancelled) return;
+        const savedById = new Map(savedClips.map((saved) => [saved.id, saved]));
+        for (const localClip of useStore.getState().clips) {
+          if (localClip.status !== "ready" || !localClip.videoUrl) continue;
+          const saved = savedById.get(localClip.id);
+          if (saved?.videoUrl && saved.videoUrl !== localClip.videoUrl) {
+            updateClip(localClip.id, { videoUrl: saved.videoUrl });
+          }
+        }
+      })
+      .catch(() => {
+        // Preview can still use temporary Modal URLs when the library is offline.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [updateClip]);
 
   const readyClips = clips.filter((c): c is Clip & { videoUrl: string } =>
     c.status === "ready" && !!c.videoUrl
   );
-
   const active = readyClips.find((c) => playhead >= c.start && playhead < c.end) ?? null;
   const activeIdx = active ? readyClips.indexOf(active) : -1;
   const next = activeIdx >= 0 ? readyClips[activeIdx + 1] ?? null : null;
 
   const slotEl = useCallback((slot: "a" | "b") => slot === "a" ? aRef.current : bRef.current, []);
-
   const slotKey = (clip: { id: string; videoUrl: string }) => `${clip.id}\0${clip.videoUrl}`;
+
+  const repairClipUrl = useCallback(async (clip: Clip & { videoUrl: string }) => {
+    const requestKey = `${clip.id}\0${clip.videoUrl}`;
+    if (repairRequestsRef.current.has(requestKey)) return;
+    repairRequestsRef.current.add(requestKey);
+    try {
+      const savedClips = await listSavedClips();
+      const saved = savedClips.find((item) => item.id === clip.id);
+      if (saved?.videoUrl && saved.videoUrl !== clip.videoUrl) {
+        updateClip(clip.id, { videoUrl: saved.videoUrl, lastError: undefined });
+      }
+    } catch {
+      // Leave the existing URL in place; a later reload can retry the refresh.
+    }
+  }, [updateClip]);
 
   const loadInto = useCallback((slot: "a" | "b", clip: { id: string; videoUrl: string }) => {
     const key = slotKey(clip);
@@ -96,19 +127,18 @@ export function VideoPreview() {
     el.load();
   }, [slotEl]);
 
-  // Load/swap clips when the active clip changes. Preload next.
   useEffect(() => {
     if (!active) return;
     const back: "a" | "b" = frontSlot === "a" ? "b" : "a";
     const cleanups: Array<() => void> = [];
+    const activeKey = slotKey(active);
+    const slotDur = active.end - active.start;
 
-    const activeKey = slotKey(active as any);
-    const slotDur = (active.end ?? 0) - (active.start ?? 0);
     if (loadedRef.current[frontSlot] === activeKey) {
       const front = slotEl(frontSlot);
       if (front) {
         applyPlaybackRate(front, slotDur, active.source);
-        seekTo(front, active as any, playhead);
+        seekTo(front, active, playhead);
         repaintIfStale(front, isPlaying);
       }
     } else if (loadedRef.current[back] === activeKey) {
@@ -117,12 +147,12 @@ export function VideoPreview() {
       oldFront?.pause();
       if (newFront) {
         applyPlaybackRate(newFront, slotDur, active.source);
-        seekTo(newFront, active as any, playhead);
+        seekTo(newFront, active, playhead);
         repaintIfStale(newFront, isPlaying);
       }
       setFrontSlot(back);
     } else {
-      loadInto(frontSlot, active as any);
+      loadInto(frontSlot, active);
       const front = slotEl(frontSlot);
       if (front) {
         const onMeta = () => applyPlaybackRate(front, slotDur, active.source);
@@ -134,19 +164,18 @@ export function VideoPreview() {
       }
     }
 
-    if (next && loadedRef.current[back] !== slotKey(next as any)) {
-      loadInto(back, next as any);
+    if (next && loadedRef.current[back] !== slotKey(next)) {
+      loadInto(back, next);
     }
-    return () => { for (const c of cleanups) c(); };
-  }, [active, next, frontSlot, slotEl, loadInto, isPlaying]);
+    return () => { for (const cleanup of cleanups) cleanup(); };
+  }, [active, next, frontSlot, slotEl, loadInto, isPlaying, playhead]);
 
-  // Sync playhead seek alignment
   useEffect(() => {
     if (!active) return;
     const front = slotEl(frontSlot);
     if (!front) return;
     const doSeek = () => {
-      seekTo(front, active as any, playhead);
+      seekTo(front, active, playhead);
       if (!isPlaying) repaintIfStale(front, false);
     };
     if (front.readyState >= 1) {
@@ -157,7 +186,6 @@ export function VideoPreview() {
     return () => front.removeEventListener("loadedmetadata", doSeek);
   }, [playhead, active, frontSlot, slotEl, isPlaying]);
 
-  // Play/pause the front element
   useEffect(() => {
     const front = slotEl(frontSlot);
     if (!front || !active) return;
@@ -170,7 +198,6 @@ export function VideoPreview() {
   }, [isPlaying, active, frontSlot, slotEl]);
 
   const containerRef = useRef<HTMLDivElement>(null);
-
   const toggleFullscreen = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -192,8 +219,22 @@ export function VideoPreview() {
 
   return (
     <div ref={containerRef} className="preview-container" style={{ position: "relative" }}>
-      <video ref={aRef} muted playsInline preload="auto" style={slotStyle("a")} />
-      <video ref={bRef} muted playsInline preload="auto" style={slotStyle("b")} />
+      <video
+        ref={aRef}
+        muted
+        playsInline
+        preload="auto"
+        style={slotStyle("a")}
+        onError={() => { if (active) void repairClipUrl(active); }}
+      />
+      <video
+        ref={bRef}
+        muted
+        playsInline
+        preload="auto"
+        style={slotStyle("b")}
+        onError={() => { if (active) void repairClipUrl(active); }}
+      />
 
       {playheadClip && (playheadClip.status === "generating" || playheadClip.status === "queued") && (
         <div className="preview-empty preview-empty-overlay" style={{ background: "rgba(9, 10, 15, 0.85)", backdropFilter: "blur(4px)", zIndex: 5 }}>
