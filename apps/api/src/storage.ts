@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdir, writeFile, readFile, rename, rm, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, extname, dirname } from "node:path";
@@ -28,9 +28,9 @@ const RENDERS = join(config.STORAGE_DIR, "renders");
 
 // Only the local backend writes to these directories. In s3 mode the API
 // streams directly to S3 — creating empty dirs here would just clutter the
-// Fargate disk. RENDERS is still needed transiently in s3 mode (ffmpeg
-// writes the mp4 there before saveRender ships it), but `renderTimeline`
-// already runs `mkdir(paths.RENDERS, { recursive: true })` on every call.
+// container disk. RENDERS is still needed transiently in s3 mode (ffmpeg
+// writes the mp4 there before saveRender ships it), but renderTimeline already
+// creates that directory on every call.
 if (config.STORAGE_BACKEND === "local") {
   await ensureDir(UPLOADS);
   await ensureDir(ANALYSES);
@@ -56,43 +56,21 @@ export interface FileEntry {
 }
 
 // --- Storage backend abstraction ---------------------------------------
-//
-// Two implementations:
-//   - local: writes to STORAGE_DIR; URLs go through Fastify's static serve.
-//     Fine for dev. On Fargate, container-local disk is ephemeral, so
-//     production runs the s3 backend.
-//   - s3:    PutObject to S3_BUCKET; URLs are virtual-hosted-style or
-//            S3_PUBLIC_URL_BASE (CloudFront). Survives container restarts.
-//
-// Both backends expose JSON metadata helpers (saveJson/loadJson/...) so
-// project, clip, image and analysis sidecars persist across task replacement
-// on Fargate (previously these were node-fs writes to ephemeral disk).
 
 export interface StorageBackend {
-  /** Persist an uploaded blob. Idempotent on content (same buffer → same id). */
   saveUpload(
     buf: Buffer,
     originalName: string,
     contentType?: string
   ): Promise<{ id: string; publicUrl: string }>;
-  /** Persist a finished render produced at a local file path.
-   *  - local backend: renames the file into the renders/ directory.
-   *  - s3 backend: uploads the bytes; the local file is left on disk and the
-   *    caller is expected to unlink it (renderTimeline does so on Fargate
-   *    where the 20 GiB ephemeral disk would otherwise fill up). */
   saveRender(localPath: string, key: string, contentType?: string): Promise<{ publicUrl: string }>;
-
-  /** Write a JSON metadata document at `key`. Overwrites any existing object. */
   saveJson(key: string, data: unknown): Promise<void>;
-  /** Read+parse a JSON metadata document. Returns null when missing. */
   loadJson<T>(key: string): Promise<T | null>;
-  /** Return every `.json` key under `prefix` (recursive). */
   listJson(prefix: string): Promise<string[]>;
-  /** Remove a JSON metadata document. Returns true when it existed. */
   deleteJson(key: string): Promise<boolean>;
-
-  /** List arbitrary files (e.g. renders/*.mp4). Recursive. */
   listFiles(prefix: string): Promise<FileEntry[]>;
+  /** Refresh an owned media URL so private S3 objects remain browser-playable. */
+  playableUrl(rawUrl: string): Promise<string>;
 }
 
 class LocalBackend implements StorageBackend {
@@ -170,6 +148,10 @@ class LocalBackend implements StorageBackend {
     });
     return out;
   }
+
+  async playableUrl(rawUrl: string): Promise<string> {
+    return rawUrl;
+  }
 }
 
 async function walkDir(dir: string, visit: (filePath: string) => Promise<void>): Promise<void> {
@@ -181,22 +163,139 @@ async function walkDir(dir: string, visit: (filePath: string) => Promise<void>):
   }
 }
 
+const PRESIGNED_URL_TTL_SECONDS = 24 * 60 * 60;
+
+function rfc3986(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (char) =>
+    `%${char.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+}
+
+function canonicalS3Path(key: string): string {
+  return `/${key.split("/").map(rfc3986).join("/")}`;
+}
+
+function hmac(key: string | Buffer, value: string): Buffer {
+  return createHmac("sha256", key).update(value, "utf8").digest();
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
 class S3Backend implements StorageBackend {
   private client: S3Client;
   private bucket: string;
   private region: string;
-  private publicBase: string;
 
   constructor() {
     this.bucket = config.S3_BUCKET!;
     this.region = config.S3_REGION!;
     this.client = new S3Client({ region: this.region });
-    this.publicBase =
-      config.S3_PUBLIC_URL_BASE ?? `https://${this.bucket}.s3.${this.region}.amazonaws.com`;
   }
 
-  private url(key: string): string {
-    return `${this.publicBase}/${key}`;
+  private async url(key: string): Promise<string> {
+    return this.signGetUrl(key);
+  }
+
+  private signGetUrl(key: string): string {
+    const accessKeyId = config.AWS_ACCESS_KEY_ID!;
+    const secretAccessKey = config.AWS_SECRET_ACCESS_KEY!;
+    const sessionToken = config.AWS_SESSION_TOKEN;
+    const host = `${this.bucket}.s3.${this.region}.amazonaws.com`;
+    const now = new Date();
+    const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+    const dateStamp = amzDate.slice(0, 8);
+    const credentialScope = `${dateStamp}/${this.region}/s3/aws4_request`;
+
+    const params: Array<[string, string]> = [
+      ["X-Amz-Algorithm", "AWS4-HMAC-SHA256"],
+      ["X-Amz-Credential", `${accessKeyId}/${credentialScope}`],
+      ["X-Amz-Date", amzDate],
+      ["X-Amz-Expires", String(PRESIGNED_URL_TTL_SECONDS)],
+      ["X-Amz-SignedHeaders", "host"],
+    ];
+    if (sessionToken) params.push(["X-Amz-Security-Token", sessionToken]);
+
+    params.sort(([aKey, aValue], [bKey, bValue]) =>
+      aKey === bKey ? aValue.localeCompare(bValue) : aKey.localeCompare(bKey)
+    );
+    const canonicalQuery = params
+      .map(([name, value]) => `${rfc3986(name)}=${rfc3986(value)}`)
+      .join("&");
+    const canonicalPath = canonicalS3Path(key);
+    const canonicalRequest = [
+      "GET",
+      canonicalPath,
+      canonicalQuery,
+      `host:${host}\n`,
+      "host",
+      "UNSIGNED-PAYLOAD",
+    ].join("\n");
+    const stringToSign = [
+      "AWS4-HMAC-SHA256",
+      amzDate,
+      credentialScope,
+      sha256(canonicalRequest),
+    ].join("\n");
+
+    const dateKey = hmac(`AWS4${secretAccessKey}`, dateStamp);
+    const regionKey = hmac(dateKey, this.region);
+    const serviceKey = hmac(regionKey, "s3");
+    const signingKey = hmac(serviceKey, "aws4_request");
+    const signature = createHmac("sha256", signingKey).update(stringToSign, "utf8").digest("hex");
+
+    return `https://${host}${canonicalPath}?${canonicalQuery}&X-Amz-Signature=${signature}`;
+  }
+
+  private keyFromUrl(rawUrl: string): string | null {
+    const cleaned = rawUrl.trim();
+    if (!cleaned) return null;
+    if (cleaned.startsWith(`s3://${this.bucket}/`)) {
+      return decodeURIComponent(cleaned.slice(`s3://${this.bucket}/`.length));
+    }
+    if (cleaned.startsWith("/media/")) {
+      return decodeURIComponent(cleaned.slice("/media/".length));
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(cleaned);
+    } catch {
+      return null;
+    }
+
+    const path = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+    const virtualHosts = new Set([
+      `${this.bucket}.s3.${this.region}.amazonaws.com`,
+      `${this.bucket}.s3.amazonaws.com`,
+    ]);
+    if (virtualHosts.has(parsed.hostname)) return path;
+
+    if (parsed.hostname === `s3.${this.region}.amazonaws.com` || parsed.hostname === "s3.amazonaws.com") {
+      const prefix = `${this.bucket}/`;
+      return path.startsWith(prefix) ? path.slice(prefix.length) : null;
+    }
+
+    if (config.S3_PUBLIC_URL_BASE) {
+      try {
+        const base = new URL(config.S3_PUBLIC_URL_BASE);
+        if (base.origin === parsed.origin) {
+          const basePath = base.pathname.replace(/^\/+|\/+$/g, "");
+          if (!basePath) return path;
+          return path.startsWith(`${basePath}/`) ? path.slice(basePath.length + 1) : null;
+        }
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  async playableUrl(rawUrl: string): Promise<string> {
+    const key = this.keyFromUrl(rawUrl);
+    return key ? this.url(key) : rawUrl;
   }
 
   async saveUpload(buf: Buffer, originalName: string, contentType?: string) {
@@ -204,8 +303,6 @@ class S3Backend implements StorageBackend {
     const ext = extname(originalName) || ".bin";
     const key = `uploads/${id}${ext}`;
 
-    // Skip the upload if the same content is already there. PutObject is idempotent
-    // on identical bodies but a HEAD round-trip is cheaper than re-uploading large audio.
     const existing = await this.head(key);
     if (!existing) {
       await this.client.send(
@@ -214,11 +311,11 @@ class S3Backend implements StorageBackend {
           Key: key,
           Body: buf,
           ContentType: contentType ?? mimeType(ext),
-          CacheControl: "public, max-age=31536000, immutable",
+          CacheControl: "private, max-age=3600",
         })
       );
     }
-    return { id, publicUrl: this.url(key) };
+    return { id, publicUrl: await this.url(key) };
   }
 
   async saveRender(localPath: string, key: string, contentType?: string) {
@@ -230,10 +327,10 @@ class S3Backend implements StorageBackend {
         Key: objectKey,
         Body: await readFile(localPath),
         ContentType: contentType ?? mimeType(ext),
-        CacheControl: "public, max-age=31536000, immutable",
+        CacheControl: "private, max-age=3600",
       })
     );
-    return { publicUrl: this.url(objectKey) };
+    return { publicUrl: await this.url(objectKey) };
   }
 
   async saveJson(key: string, data: unknown): Promise<void> {
@@ -243,9 +340,6 @@ class S3Backend implements StorageBackend {
         Key: key,
         Body: JSON.stringify(data),
         ContentType: "application/json",
-        // Metadata JSON gets overwritten on every save; tell any caches not
-        // to keep a copy. (`no-cache` would still allow stale-while-revalidate
-        // semantics — `no-store` is the no-caching directive we actually want.)
         CacheControl: "no-store, max-age=0",
       })
     );
@@ -271,8 +365,6 @@ class S3Backend implements StorageBackend {
   }
 
   async deleteJson(key: string): Promise<boolean> {
-    // S3 DeleteObject is idempotent and doesn't tell us if the key existed.
-    // Do a HEAD first so callers (e.g. DELETE /projects/:id) can return 404.
     if (!(await this.head(key))) return false;
     await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
     return true;
@@ -280,14 +372,16 @@ class S3Backend implements StorageBackend {
 
   async listFiles(prefix: string): Promise<FileEntry[]> {
     const all = await this.listAll(prefix);
-    return all
-      .filter((o) => o.Key)
-      .map((o) => ({
-        key: o.Key!,
-        publicUrl: this.url(o.Key!),
-        size: o.Size ?? 0,
-        modifiedAt: o.LastModified?.toISOString() ?? new Date(0).toISOString(),
-      }));
+    return Promise.all(
+      all
+        .filter((o) => o.Key)
+        .map(async (o) => ({
+          key: o.Key!,
+          publicUrl: await this.url(o.Key!),
+          size: o.Size ?? 0,
+          modifiedAt: o.LastModified?.toISOString() ?? new Date(0).toISOString(),
+        }))
+    );
   }
 
   private async listAll(prefix: string): Promise<_Object[]> {
@@ -328,15 +422,16 @@ export const storage: StorageBackend =
     ? new S3Backend()
     : new LocalBackend();
 
-// Convenience wrapper used by the upload endpoints.
 export async function saveUpload(buf: Buffer, originalName: string, contentType?: string) {
   return storage.saveUpload(buf, originalName, contentType);
 }
 
+/** Return a fresh browser-playable URL for local or private-S3 media. */
+export async function playableUrl(rawUrl: string): Promise<string> {
+  return storage.playableUrl(rawUrl);
+}
+
 // --- Analysis cache ------------------------------------------------------
-// Lives at analyses/<songId>.json (or .error.json / .vocal.json). Goes
-// through the storage backend so cached analyses survive task replacement
-// (S3 in prod, local disk in dev).
 
 export async function readAnalysis(songId: string): Promise<AudioAnalysis | null> {
   const parsed = await storage.loadJson<unknown>(`analyses/${songId}.json`);
@@ -369,7 +464,7 @@ export async function clearAnalysisError(songId: string): Promise<void> {
 
 export async function readVocalStemUrl(songId: string): Promise<string | null> {
   const parsed = await storage.loadJson<{ url?: string }>(`analyses/${songId}.vocal.json`);
-  return typeof parsed?.url === "string" ? parsed.url : null;
+  return typeof parsed?.url === "string" ? storage.playableUrl(parsed.url) : null;
 }
 
 export async function writeVocalStemUrl(songId: string, url: string): Promise<void> {
