@@ -75,7 +75,7 @@ const referenceListener = `  useEffect(() => {
         if (!current) return current;
         if (kind === "note") {
           const vision = note
-            ? [current.vision.trim(), note].filter(Boolean).join("\n")
+            ? [current.vision.trim(), note].filter(Boolean).join("\\n")
             : current.vision;
           return { ...current, vision };
         }
@@ -86,7 +86,7 @@ const referenceListener = `  useEffect(() => {
           : kind + " visual reference supplied";
         const mustInclude = [current.mustInclude.trim(), referenceLine]
           .filter(Boolean)
-          .join("\n");
+          .join("\\n");
 
         return {
           ...current,
