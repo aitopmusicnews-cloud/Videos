@@ -220,7 +220,8 @@ def _download_valid_gemma(snapshot_download, token: str) -> None:
     cpu=16.0,
     memory=131072,
     timeout=7200,
-    scaledown_window=300,
+    # Keep the warmed worker available while the user is active in the studio.
+    scaledown_window=900,
     secrets=[hf_secret],
     volumes={str(MODEL_DIR): model_volume, str(OUTPUT_DIR): output_volume},
 )
@@ -265,6 +266,12 @@ class LipDubRunner:
         _download_valid_gemma(snapshot_download, token)
         model_volume.commit()
         print("[LTX-2.3 LipDub] Models ready; Gemma snapshot validated.")
+
+    @modal.method()
+    def warmup(self) -> dict[str, Any]:
+        """Start the GPU container and run the @modal.enter model checks."""
+        print("[LTX-2.3 LipDub] Warm-up complete; worker is ready.")
+        return {"status": "ready", "models": "validated"}
 
     @modal.method()
     def generate(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -414,6 +421,10 @@ def get_file(filename: str):
 @modal.fastapi_endpoint(method="POST")
 def lip_sync(payload: dict[str, Any]):
     from fastapi import HTTPException
+
+    if payload.get("action") == "warmup":
+        call = LipDubRunner().warmup.spawn()
+        return {"status": "warming", "call_id": call.object_id}
 
     if not (payload.get("video_url") or payload.get("video_base64")):
         raise HTTPException(status_code=400, detail="video_url or video_base64 is required")
