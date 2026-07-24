@@ -5,14 +5,15 @@ Deploy after creating a Modal secret named ``huggingface`` containing HF_TOKEN:
     modal secret create huggingface HF_TOKEN=hf_...
     modal deploy modal/ltx_lip_sync.py
 
-The Hugging Face account behind the token must have access to both:
-- google/gemma-3-12b-it-qat-q4_0-unquantized
+The Hugging Face token must have access to:
+- Lightricks/LTX-2.3
 - Lightricks/LTX-2.3-22b-IC-LoRA-LipDub
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import os
 import shutil
 import subprocess
@@ -28,12 +29,26 @@ app = modal.App("mvs-ltx-lipdub")
 MODEL_DIR = Path("/models")
 OUTPUT_DIR = Path("/outputs")
 LTX_MODEL_DIR = MODEL_DIR / "ltx-2.3"
-GEMMA_DIR = MODEL_DIR / "gemma-3-12b"
+# Use a fresh directory so an incomplete snapshot from the older worker cannot
+# be selected by LTX's recursive model*.safetensors search.
+GEMMA_DIR = MODEL_DIR / "gemma-3-12b-ltx"
 LIPDUB_DIR = MODEL_DIR / "lipdub"
 
+GEMMA_REPO_ID = "Lightricks/gemma-3-12b-it-qat-q4_0-unquantized"
 CHECKPOINT_NAME = "ltx-2.3-22b-distilled-1.1.safetensors"
 UPSCALER_NAME = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
 LIPDUB_NAME = "ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors"
+GEMMA_SHARDS = tuple(f"model-{index:05d}-of-00005.safetensors" for index in range(1, 6))
+GEMMA_REQUIRED_FILES = (
+    "config.json",
+    "model.safetensors.index.json",
+    "preprocessor_config.json",
+    "processor_config.json",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    *GEMMA_SHARDS,
+)
 
 model_volume = modal.Volume.from_name("mvs-ltx23-lipdub-models", create_if_missing=True)
 output_volume = modal.Volume.from_name("mvs-ltx23-lipdub-outputs", create_if_missing=True)
@@ -52,6 +67,7 @@ lipdub_image = (
         "httpx>=0.27.2",
         "huggingface_hub>=0.36.0",
         "hf_xet>=1.1.0",
+        "safetensors>=0.5.0",
     )
     .run_commands(
         "git clone --depth 1 https://github.com/Lightricks/LTX-2.git /opt/LTX-2",
@@ -82,7 +98,8 @@ def _run(command: list[str], *, timeout: int | None = None) -> None:
     if completed.stderr:
         print(completed.stderr)
     if completed.returncode != 0:
-        tail = (completed.stderr or completed.stdout or "unknown command failure")[-6000:]
+        combined = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+        tail = (combined or "unknown command failure")[-16_000:]
         raise RuntimeError(f"Command failed ({completed.returncode}): {tail}")
 
 
@@ -137,6 +154,62 @@ def _send_webhook(webhook_url: str | None, payload: dict[str, Any]) -> None:
         print(f"[LipDub webhook] callback failed: {error}")
 
 
+def _gemma_snapshot_error(root: Path) -> str | None:
+    """Return a useful error when the local Gemma snapshot is incomplete/corrupt."""
+    missing = [name for name in GEMMA_REQUIRED_FILES if not (root / name).is_file()]
+    if missing:
+        return f"missing files: {', '.join(missing)}"
+
+    # Xet/LFS pointer files are tiny. Real Gemma shards are several GB each.
+    undersized = [
+        shard
+        for shard in GEMMA_SHARDS
+        if (root / shard).stat().st_size < 1_000_000_000
+    ]
+    if undersized:
+        return f"incomplete model shards: {', '.join(undersized)}"
+
+    try:
+        index = json.loads((root / "model.safetensors.index.json").read_text())
+        referenced = set(index.get("weight_map", {}).values())
+        missing_references = sorted(name for name in referenced if not (root / name).is_file())
+        if missing_references:
+            return f"index references missing shards: {', '.join(missing_references)}"
+    except Exception as error:  # noqa: BLE001
+        return f"invalid model index: {error}"
+
+    try:
+        from safetensors import safe_open
+
+        for shard in GEMMA_SHARDS:
+            with safe_open(root / shard, framework="pt", device="cpu") as handle:
+                if next(iter(handle.keys()), None) is None:
+                    return f"empty safetensors shard: {shard}"
+    except Exception as error:  # noqa: BLE001
+        return f"invalid safetensors shard: {error}"
+
+    return None
+
+
+def _download_valid_gemma(snapshot_download, token: str) -> None:
+    error = _gemma_snapshot_error(GEMMA_DIR) if GEMMA_DIR.exists() else "snapshot not present"
+    if error:
+        print(f"[LTX-2.3 LipDub] Rebuilding Gemma cache ({error})")
+        shutil.rmtree(GEMMA_DIR, ignore_errors=True)
+        GEMMA_DIR.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id=GEMMA_REPO_ID,
+            local_dir=str(GEMMA_DIR),
+            token=token,
+            allow_patterns=list(GEMMA_REQUIRED_FILES),
+            max_workers=8,
+        )
+
+    error = _gemma_snapshot_error(GEMMA_DIR)
+    if error:
+        raise RuntimeError(f"Gemma snapshot validation failed after download: {error}")
+
+
 @app.cls(
     image=lipdub_image,
     gpu="A100-80GB",
@@ -157,7 +230,6 @@ class LipDubRunner:
             raise RuntimeError("HF_TOKEN is missing from the Modal 'huggingface' secret")
 
         LTX_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        GEMMA_DIR.mkdir(parents=True, exist_ok=True)
         LIPDUB_DIR.mkdir(parents=True, exist_ok=True)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -186,13 +258,9 @@ class LipDubRunner:
                 token=token,
             )
         )
-        snapshot_download(
-            repo_id="google/gemma-3-12b-it-qat-q4_0-unquantized",
-            local_dir=str(GEMMA_DIR),
-            token=token,
-        )
+        _download_valid_gemma(snapshot_download, token)
         model_volume.commit()
-        print("[LTX-2.3 LipDub] Models ready.")
+        print("[LTX-2.3 LipDub] Models ready; Gemma snapshot validated.")
 
     @modal.method()
     def generate(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -289,8 +357,9 @@ class LipDubRunner:
                     str(seed),
                     "--quantization",
                     "fp8-cast",
-                    "--offload",
-                    "cpu",
+                    # Do not force --offload cpu. On A100-80GB the text encoder
+                    # fits by itself, and the official pipeline frees it before
+                    # constructing the diffusion transformer.
                     "--output-path",
                     str(output_path),
                 ],
