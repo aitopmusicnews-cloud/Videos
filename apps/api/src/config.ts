@@ -30,6 +30,7 @@ const Env = z.object({
   AWS_REGION: optionalNonEmpty.optional(),
   AWS_ACCESS_KEY_ID: optionalNonEmpty.optional(),
   AWS_SECRET_ACCESS_KEY: optionalNonEmpty.optional(),
+  AWS_SESSION_TOKEN: optionalNonEmpty.optional(),
   S3_PUBLIC_URL_BASE: optionalUrl.optional(),
   WEB_DIST_DIR: optionalNonEmpty.optional(),
 });
