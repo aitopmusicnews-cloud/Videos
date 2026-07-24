@@ -98,7 +98,7 @@ patchedModalAi = replaceRequired(
   "character requirement Modal payload",
 );
 
-const patchedDirectorAgent = replaceRequired(
+let patchedDirectorAgent = replaceRequired(
   originalDirectorAgent,
   `      generationConfig: {
         temperature: 0.35,
@@ -111,22 +111,46 @@ const patchedDirectorAgent = replaceRequired(
         },
       },`,
   `      generationConfig: {
-        maxOutputTokens: 32768,
+        maxOutputTokens: 16384,
         responseFormat: {
           text: {
             mimeType: "APPLICATION_JSON",
-            schema: RESPONSE_SCHEMA,
           },
         },
       },`,
-  "Gemini 3.6 structured output enum configuration",
+  "Gemini JSON mode without server-side schema",
+);
+
+patchedDirectorAgent = replaceRequired(
+  patchedDirectorAgent,
+  `  if (!response.ok) {
+    let message = text;
+    try {
+      message = JSON.parse(text)?.error?.message ?? text;
+    } catch {
+      // Keep the original response text.
+    }
+    throw new Error(\`Gemini Director failed: \${message.slice(0, 800)}\`);
+  }`,
+  `  if (!response.ok) {
+    let message = text;
+    try {
+      const parsedError = JSON.parse(text)?.error;
+      const details = parsedError?.details ? \` Details: \${JSON.stringify(parsedError.details)}\` : "";
+      message = \`\${parsedError?.message ?? text}\${details}\`;
+    } catch {
+      // Keep the original response text.
+    }
+    throw new Error(\`Gemini Director failed: \${message.slice(0, 1600)}\`);
+  }`,
+  "detailed Gemini API errors",
 );
 
 try {
   await writeFile(serverPath, patchedServer, "utf8");
   await writeFile(modalAiPath, patchedModalAi, "utf8");
   await writeFile(directorAgentPath, patchedDirectorAgent, "utf8");
-  console.log("[api build] Wired Gemini LTX Director route, Gemini 3.6 JSON response format, and strict character conditioning.");
+  console.log("[api build] Wired Gemini LTX Director route, JSON mode with app validation, and strict character conditioning.");
   await run("tsc", ["-p", "tsconfig.json"]);
 } finally {
   await writeFile(serverPath, originalServer, "utf8");
