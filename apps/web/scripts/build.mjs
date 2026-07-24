@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { patchDirectorStatus } from "./director-status-patch.mjs";
+import { patchDirectorEditing } from "./director-edit-patch.mjs";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sidebarPath = resolve(webRoot, "src/components/Sidebar.tsx");
@@ -73,7 +75,7 @@ const referenceListener = `  useEffect(() => {
         if (!current) return current;
         if (kind === "note") {
           const vision = note
-            ? [current.vision.trim(), note].filter(Boolean).join("\\n")
+            ? [current.vision.trim(), note].filter(Boolean).join("\n")
             : current.vision;
           return { ...current, vision };
         }
@@ -84,7 +86,7 @@ const referenceListener = `  useEffect(() => {
           : kind + " visual reference supplied";
         const mustInclude = [current.mustInclude.trim(), referenceLine]
           .filter(Boolean)
-          .join("\\n");
+          .join("\n");
 
         return {
           ...current,
@@ -104,12 +106,14 @@ const referenceListener = `  useEffect(() => {
 
 ${directorEffectAnchor}`;
 
-const patchedDirector = replaceRequired(
+let patchedDirector = replaceRequired(
   originalDirector,
   directorEffectAnchor,
   referenceListener,
   "Director reference chat listener",
 );
+patchedDirector = patchDirectorStatus(patchedDirector, replaceRequired);
+patchedDirector = patchDirectorEditing(patchedDirector, replaceRequired);
 
 const oldApiErrorMessage = `    const msg = parsed?.error ?? text;
     throw new ApiError(res.status, msg, parsed?.rateLimited === true);`;
@@ -171,7 +175,7 @@ try {
   }
 
   await writeFile(directorPath, patchedDirector, "utf8");
-  console.log("[web build] Connected reference chat to the Director session.");
+  console.log("[web build] Connected references, status bars, unlimited editing, and storyboard acceptance to Director.");
 
   await writeFile(apiPath, patchedApi, "utf8");
   console.log("[web build] Added transient Render retry and safe API error messages.");
