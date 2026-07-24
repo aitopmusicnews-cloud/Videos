@@ -91,7 +91,8 @@ export async function listProjects(): Promise<ProjectMeta[]> {
 export async function loadProject(id: string): Promise<SavedProject | null> {
   const saved = await storage.loadJson<SavedProject>(projectMetaKey(id));
   if (!saved) return null;
-  return refreshMediaUrls(saved) as Promise<SavedProject>;
+  const refreshed = await refreshMediaUrls(saved as unknown as JsonMutable);
+  return refreshed as unknown as SavedProject;
 }
 
 export async function deleteProject(id: string): Promise<boolean> {
