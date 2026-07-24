@@ -10,6 +10,7 @@ import { Timeline } from "../components/Timeline.js";
 import { TimelineDropzone } from "../components/TimelineDropzone.js";
 import { VideoPreview } from "../components/VideoPreview.js";
 import { Toasts } from "../components/Toasts.js";
+import { AutoDirector } from "../components/AutoDirector.js";
 
 export function Editor() {
   const analysis = useStore((s) => s.analysis);
@@ -77,6 +78,7 @@ export function Editor() {
       </main>
       <RightSidebar />
       {analysis ? <Timeline /> : <TimelineDropzone />}
+      <AutoDirector />
       <Toasts />
     </div>
   );
