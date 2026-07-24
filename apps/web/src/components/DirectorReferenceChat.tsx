@@ -5,6 +5,7 @@ import { toast } from "../lib/toast.js";
 
 type ReferenceKind = "character" | "style" | "location" | "shot";
 type ReferenceMedia = "image" | "video" | "note";
+type ReferenceStatus = "uploading" | "extracting" | "ready" | "failed";
 
 type ReferenceItem = {
   id: string;
@@ -14,6 +15,9 @@ type ReferenceItem = {
   url?: string;
   anchorUrl?: string;
   note?: string;
+  status?: ReferenceStatus;
+  progress?: number;
+  error?: string;
   createdAt: number;
 };
 
@@ -24,6 +28,13 @@ type DirectorReferenceDetail = {
   url?: string;
   sourceUrl?: string;
   note?: string;
+};
+
+type BatchProgress = {
+  label: string;
+  current: number;
+  total: number;
+  percent: number;
 };
 
 const REFERENCE_EVENT = "mvs-director-reference";
@@ -45,6 +56,19 @@ function dispatchReference(detail: DirectorReferenceDetail): void {
   window.dispatchEvent(new CustomEvent<DirectorReferenceDetail>(REFERENCE_EVENT, { detail }));
 }
 
+function statusLabel(status: ReferenceStatus): string {
+  if (status === "uploading") return "Uploading";
+  if (status === "extracting") return "Preparing video frame";
+  if (status === "failed") return "Failed";
+  return "Ready for Director";
+}
+
+function statusFill(status: ReferenceStatus): string {
+  if (status === "failed") return "#ef4444";
+  if (status === "ready") return "#22c55e";
+  return "#3b82f6";
+}
+
 export function DirectorReferenceChat() {
   const songId = useStore((state) => state.songId);
   const [open, setOpen] = useState(false);
@@ -52,17 +76,37 @@ export function DirectorReferenceChat() {
   const [draft, setDraft] = useState("");
   const [kind, setKind] = useState<ReferenceKind>("style");
   const [uploading, setUploading] = useState<string | null>(null);
+  const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!songId) {
       setItems([]);
       setOpen(false);
+      setBatchProgress(null);
       return;
     }
     try {
       const raw = localStorage.getItem(storageKey(songId));
-      setItems(raw ? JSON.parse(raw) as ReferenceItem[] : []);
+      const parsed = raw ? JSON.parse(raw) as ReferenceItem[] : [];
+      const restored = Array.isArray(parsed)
+        ? parsed.map((item) => {
+            if (item.status === "uploading" || item.status === "extracting") {
+              return {
+                ...item,
+                status: "failed" as const,
+                progress: 100,
+                error: "Processing was interrupted. Choose this file again.",
+              };
+            }
+            return {
+              ...item,
+              status: item.media === "note" ? undefined : item.status ?? "ready",
+              progress: item.media === "note" ? undefined : item.progress ?? 100,
+            };
+          })
+        : [];
+      setItems(restored);
     } catch (error) {
       console.warn("Could not restore Director reference chat", error);
       setItems([]);
@@ -75,6 +119,19 @@ export function DirectorReferenceChat() {
   }, [items, songId]);
 
   if (!songId) return null;
+
+  const updateItem = (id: string, patch: Partial<ReferenceItem>) => {
+    setItems((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
+  };
+
+  const updateBatch = (index: number, total: number, fraction: number, label: string) => {
+    setBatchProgress({
+      label,
+      current: Math.min(total, index + 1),
+      total,
+      percent: Math.min(100, Math.max(1, Math.round(((index + fraction) / total) * 100))),
+    });
+  };
 
   const sendNote = () => {
     const note = draft.trim();
@@ -97,6 +154,10 @@ export function DirectorReferenceChat() {
     if (item.media === "note") {
       dispatchReference({ kind: "note", media: "note", name: item.name, note: item.note });
       toast.success("Creative note sent to the Director");
+      return;
+    }
+    if ((item.status ?? "ready") !== "ready") {
+      toast.error("Wait for this reference to finish processing");
       return;
     }
     const anchorUrl = item.anchorUrl ?? (item.media === "image" ? item.url : undefined);
@@ -123,64 +184,89 @@ export function DirectorReferenceChat() {
       return;
     }
 
+    setOpen(true);
     for (let index = 0; index < accepted.length; index += 1) {
       const file = accepted[index]!;
+      const id = `ref-${crypto.randomUUID().slice(0, 8)}`;
+      const media: ReferenceMedia = isImage(file) ? "image" : "video";
+      const pending: ReferenceItem = {
+        id,
+        kind,
+        media,
+        name: file.name,
+        note: draft.trim() || undefined,
+        status: "uploading",
+        progress: 5,
+        createdAt: Date.now(),
+      };
+      setItems((current) => [...current, pending]);
       setUploading(`Uploading ${index + 1} of ${accepted.length}: ${file.name}`);
+      updateBatch(index, accepted.length, 0.05, `Uploading ${file.name}`);
+
       try {
-        let item: ReferenceItem;
-        if (isImage(file)) {
+        let completed: ReferenceItem;
+        if (media === "image") {
+          updateItem(id, { progress: 20 });
           const uploaded = await uploadImage(file);
-          item = {
-            id: `ref-${crypto.randomUUID().slice(0, 8)}`,
-            kind,
-            media: "image",
-            name: file.name,
+          updateItem(id, { url: uploaded.url, anchorUrl: uploaded.url, progress: 85 });
+          updateBatch(index, accepted.length, 0.85, `Applying ${file.name} to the Director`);
+          completed = {
+            ...pending,
             url: uploaded.url,
             anchorUrl: uploaded.url,
-            note: draft.trim() || undefined,
-            createdAt: Date.now(),
+            status: "ready",
+            progress: 100,
           };
         } else {
+          updateItem(id, { progress: 20 });
           const uploaded = await uploadVideo(file);
-          let anchorUrl: string | undefined;
-          try {
-            setUploading(`Extracting reference frame: ${file.name}`);
-            anchorUrl = (await extractLastFrame(uploaded.url)).url;
-          } catch (error) {
-            console.warn("Could not extract reference frame", error);
-          }
-          item = {
-            id: `ref-${crypto.randomUUID().slice(0, 8)}`,
-            kind,
-            media: "video",
-            name: file.name,
+          updateItem(id, {
+            url: uploaded.url,
+            status: "extracting",
+            progress: 65,
+          });
+          setUploading(`Extracting reference frame: ${file.name}`);
+          updateBatch(index, accepted.length, 0.65, `Preparing a usable frame from ${file.name}`);
+          const anchorUrl = (await extractLastFrame(uploaded.url)).url;
+          completed = {
+            ...pending,
             url: uploaded.url,
             anchorUrl,
-            note: draft.trim() || undefined,
-            createdAt: Date.now(),
+            status: "ready",
+            progress: 100,
           };
         }
 
-        setItems((current) => [...current, item]);
-        const anchorUrl = item.anchorUrl ?? (item.media === "image" ? item.url : undefined);
+        updateItem(id, completed);
+        const anchorUrl = completed.anchorUrl ?? (completed.media === "image" ? completed.url : undefined);
         if (anchorUrl) {
           dispatchReference({
             kind,
-            media: item.media,
-            name: item.name,
+            media: completed.media,
+            name: completed.name,
             url: anchorUrl,
-            sourceUrl: item.url,
-            note: item.note,
+            sourceUrl: completed.url,
+            note: completed.note,
           });
         }
+        updateBatch(index, accepted.length, 1, `${file.name} is ready`);
         toast.success(`${file.name} added as a ${kind} reference`);
       } catch (error) {
-        toast.error(`Reference upload failed: ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        updateItem(id, {
+          status: "failed",
+          progress: 100,
+          error: message,
+        });
+        updateBatch(index, accepted.length, 1, `${file.name} failed`);
+        toast.error(`Reference upload failed: ${message}`);
       }
     }
 
     setDraft("");
     setUploading(null);
+    setBatchProgress((current) => current ? { ...current, label: "Reference processing complete", percent: 100 } : current);
+    window.setTimeout(() => setBatchProgress(null), 1400);
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -192,6 +278,7 @@ export function DirectorReferenceChat() {
     return (
       <button type="button" style={launcherStyle} onClick={() => setOpen(true)}>
         ＋ References
+        {uploading && <span style={activityDotStyle} aria-label="Reference processing active" />}
         {items.length > 0 && <span style={countStyle}>{items.length}</span>}
       </button>
     );
@@ -207,6 +294,19 @@ export function DirectorReferenceChat() {
         <button type="button" className="btn ghost" onClick={() => setOpen(false)}>Close</button>
       </header>
 
+      {batchProgress && (
+        <div style={batchProgressStyle} role="status" aria-live="polite">
+          <div style={progressHeaderStyle}>
+            <span>{batchProgress.label}</span>
+            <strong>{batchProgress.percent}%</strong>
+          </div>
+          <div style={progressTrackStyle}>
+            <div style={{ ...progressFillStyle, width: `${batchProgress.percent}%` }} />
+          </div>
+          <div style={progressMetaStyle}>File {batchProgress.current} of {batchProgress.total}</div>
+        </div>
+      )}
+
       <div style={messagesStyle}>
         <div style={assistantBubbleStyle}>
           Upload character photos, visual references, locations, wardrobe, shot examples, or videos. Add a note explaining what the Director should borrow from each reference.
@@ -216,36 +316,54 @@ export function DirectorReferenceChat() {
           <div style={emptyStyle}>No references uploaded for this song yet.</div>
         )}
 
-        {items.map((item) => (
-          <article key={item.id} style={userBubbleStyle}>
-            <div style={assetHeaderStyle}>
-              <span style={tagStyle}>{item.kind === "note" ? "creative note" : `${item.kind} reference`}</span>
-              <button type="button" style={removeStyle} onClick={() => removeItem(item.id)} aria-label={`Remove ${item.name}`}>×</button>
-            </div>
-
-            {item.media === "image" && item.url && (
-              <img src={item.url} alt={item.name} style={imageStyle} />
-            )}
-            {item.media === "video" && item.url && (
-              <video src={item.url} controls preload="metadata" style={videoStyle} />
-            )}
-
-            <strong style={{ display: "block", marginTop: item.media === "note" ? 0 : 9 }}>{item.name}</strong>
-            {item.note && <div style={noteStyle}>{item.note}</div>}
-            {item.media === "video" && !item.anchorUrl && (
-              <div style={warningStyle}>The video uploaded, but its reference frame could not be extracted.</div>
-            )}
-
-            {item.media !== "note" && (
-              <div style={actionsStyle}>
-                <button type="button" className="btn ghost" onClick={() => applyReference(item, "character")}>Use as character</button>
-                <button type="button" className="btn ghost" onClick={() => applyReference(item, "style")}>Style</button>
-                <button type="button" className="btn ghost" onClick={() => applyReference(item, "location")}>Location</button>
-                <button type="button" className="btn ghost" onClick={() => applyReference(item, "shot")}>Shot</button>
+        {items.map((item) => {
+          const itemStatus = item.status ?? "ready";
+          const itemProgress = item.progress ?? 100;
+          return (
+            <article key={item.id} style={userBubbleStyle}>
+              <div style={assetHeaderStyle}>
+                <span style={tagStyle}>{item.kind === "note" ? "creative note" : `${item.kind} reference`}</span>
+                <button type="button" style={removeStyle} onClick={() => removeItem(item.id)} aria-label={`Remove ${item.name}`}>×</button>
               </div>
-            )}
-          </article>
-        ))}
+
+              {item.media === "image" && item.url && (
+                <img src={item.url} alt={item.name} style={imageStyle} />
+              )}
+              {item.media === "video" && item.url && (
+                <video src={item.url} controls preload="metadata" style={videoStyle} />
+              )}
+
+              <strong style={{ display: "block", marginTop: item.media === "note" ? 0 : 9 }}>{item.name}</strong>
+              {item.note && <div style={noteStyle}>{item.note}</div>}
+
+              {item.media !== "note" && (
+                <div style={itemProgressStyle}>
+                  <div style={progressHeaderStyle}>
+                    <span>{statusLabel(itemStatus)}</span>
+                    <strong>{itemProgress}%</strong>
+                  </div>
+                  <div style={progressTrackStyle}>
+                    <div style={{ ...progressFillStyle, width: `${itemProgress}%`, background: statusFill(itemStatus) }} />
+                  </div>
+                </div>
+              )}
+
+              {item.error && <div style={errorStyle}>{item.error}</div>}
+              {item.media === "video" && itemStatus === "ready" && !item.anchorUrl && (
+                <div style={warningStyle}>The video uploaded, but its reference frame could not be extracted.</div>
+              )}
+
+              {item.media !== "note" && (
+                <div style={actionsStyle}>
+                  <button type="button" className="btn ghost" disabled={itemStatus !== "ready"} onClick={() => applyReference(item, "character")}>Use as character</button>
+                  <button type="button" className="btn ghost" disabled={itemStatus !== "ready"} onClick={() => applyReference(item, "style")}>Style</button>
+                  <button type="button" className="btn ghost" disabled={itemStatus !== "ready"} onClick={() => applyReference(item, "location")}>Location</button>
+                  <button type="button" className="btn ghost" disabled={itemStatus !== "ready"} onClick={() => applyReference(item, "shot")}>Shot</button>
+                </div>
+              )}
+            </article>
+          );
+        })}
       </div>
 
       <div
@@ -317,9 +435,15 @@ const launcherStyle: CSSProperties = {
 };
 
 const countStyle: CSSProperties = { minWidth: 20, height: 20, padding: "0 6px", display: "grid", placeItems: "center", borderRadius: 999, background: "#2563eb", color: "white", fontSize: 11 };
+const activityDotStyle: CSSProperties = { width: 8, height: 8, borderRadius: 999, background: "#60a5fa", boxShadow: "0 0 0 4px rgba(96,165,250,.16)" };
 const panelStyle: CSSProperties = { position: "fixed", zIndex: 540, right: 18, bottom: 18, width: "min(430px, calc(100vw - 36px))", height: "min(760px, calc(100vh - 36px))", display: "flex", flexDirection: "column", overflow: "hidden", color: "#fafafa", background: "#09090b", border: "1px solid rgba(255,255,255,.15)", borderRadius: 18, boxShadow: "0 30px 100px rgba(0,0,0,.65)" };
 const headerStyle: CSSProperties = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "16px 17px", borderBottom: "1px solid rgba(255,255,255,.09)" };
 const eyebrowStyle: CSSProperties = { marginBottom: 3, fontSize: 10, letterSpacing: ".13em", textTransform: "uppercase", opacity: .55 };
+const batchProgressStyle: CSSProperties = { padding: "11px 15px", borderBottom: "1px solid rgba(96,165,250,.2)", background: "rgba(59,130,246,.09)" };
+const progressHeaderStyle: CSSProperties = { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, fontSize: 11, color: "#dbeafe" };
+const progressTrackStyle: CSSProperties = { height: 7, marginTop: 7, overflow: "hidden", borderRadius: 999, background: "rgba(255,255,255,.1)" };
+const progressFillStyle: CSSProperties = { height: "100%", borderRadius: 999, background: "#3b82f6", transition: "width .25s ease" };
+const progressMetaStyle: CSSProperties = { marginTop: 5, fontSize: 10, color: "#93c5fd" };
 const messagesStyle: CSSProperties = { flex: 1, overflowY: "auto", padding: 15, display: "flex", flexDirection: "column", gap: 12 };
 const assistantBubbleStyle: CSSProperties = { alignSelf: "flex-start", maxWidth: "91%", padding: "11px 13px", borderRadius: "14px 14px 14px 4px", background: "rgba(59,130,246,.14)", border: "1px solid rgba(96,165,250,.22)", color: "#dbeafe", lineHeight: 1.45, fontSize: 13 };
 const userBubbleStyle: CSSProperties = { alignSelf: "flex-end", width: "94%", padding: 11, borderRadius: "14px 14px 4px 14px", background: "rgba(255,255,255,.055)", border: "1px solid rgba(255,255,255,.1)" };
@@ -330,7 +454,9 @@ const removeStyle: CSSProperties = { border: 0, background: "transparent", color
 const imageStyle: CSSProperties = { width: "100%", maxHeight: 260, objectFit: "contain", borderRadius: 10, background: "#000" };
 const videoStyle: CSSProperties = { width: "100%", maxHeight: 260, borderRadius: 10, background: "#000" };
 const noteStyle: CSSProperties = { marginTop: 6, opacity: .78, lineHeight: 1.4, fontSize: 13, whiteSpace: "pre-wrap" };
+const itemProgressStyle: CSSProperties = { marginTop: 10, padding: "8px 9px", borderRadius: 9, background: "rgba(255,255,255,.035)" };
 const warningStyle: CSSProperties = { marginTop: 8, padding: 8, borderRadius: 8, color: "#fde68a", background: "rgba(245,158,11,.1)", fontSize: 12 };
+const errorStyle: CSSProperties = { marginTop: 8, padding: 8, borderRadius: 8, color: "#fecaca", background: "rgba(239,68,68,.11)", border: "1px solid rgba(239,68,68,.22)", fontSize: 12, lineHeight: 1.4 };
 const actionsStyle: CSSProperties = { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 };
 const composerStyle: CSSProperties = { padding: 14, borderTop: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.025)" };
 const labelStyle: CSSProperties = { display: "grid", gridTemplateColumns: "auto 1fr", alignItems: "center", gap: 10, marginBottom: 9, color: "#a1a1aa", fontSize: 11 };
