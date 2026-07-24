@@ -19,6 +19,8 @@ const Env = z.object({
   MODAL_FILE_RESOLVER_URL: optionalUrl.optional(),
   MODAL_KEY: optionalNonEmpty.optional(),
   MODAL_SECRET: optionalNonEmpty.optional(),
+  GEMINI_API_KEY: optionalNonEmpty.optional(),
+  GEMINI_DIRECTOR_MODEL: z.string().trim().min(1).default("gemini-3.6-flash"),
   API_AUTH_TOKEN: optionalNonEmpty.optional(),
   PORT: z.coerce.number().default(3001),
   PUBLIC_BASE_URL: optionalUrl.optional(),
@@ -85,6 +87,9 @@ if (!config.MODAL_MEDIA_SUITE_URL) {
 }
 if (!config.MODAL_LIPSYNC_URL) {
   console.log("INFO: MODAL_LIPSYNC_URL is missing. Lip-sync is offline.");
+}
+if (!config.GEMINI_API_KEY) {
+  console.log("INFO: GEMINI_API_KEY is missing. The LTX Director Agent is offline and will not use a fallback planner.");
 }
 
 export type Config = typeof config;
