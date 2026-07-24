@@ -29,8 +29,6 @@ app = modal.App("mvs-ltx-lipdub")
 MODEL_DIR = Path("/models")
 OUTPUT_DIR = Path("/outputs")
 LTX_MODEL_DIR = MODEL_DIR / "ltx-2.3"
-# Use a fresh directory so an incomplete snapshot from the older worker cannot
-# be selected by LTX's recursive model*.safetensors search.
 GEMMA_DIR = MODEL_DIR / "gemma-3-12b-ltx"
 LIPDUB_DIR = MODEL_DIR / "lipdub"
 
@@ -58,6 +56,9 @@ web_image = modal.Image.debian_slim(python_version="3.12").pip_install(
     "fastapi[standard]>=0.115.8",
 )
 
+# Pin the complete PyTorch family to one official CUDA 12.8 release. Installing
+# an unpinned torchvision allowed the LTX dependency resolver to select a newer
+# CUDA 13 Torch build, which failed in Modal with missing libcudart.so.13.
 lipdub_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("build-essential", "ffmpeg", "git")
@@ -68,14 +69,13 @@ lipdub_image = (
         "huggingface_hub>=0.36.0",
         "hf_xet>=1.1.0",
         "safetensors>=0.5.0",
-        # LTX Core requires torch~=2.7. Torchvision 0.22 is the matching
-        # release line and is required by Transformers AutoImageProcessor.
-        "torchvision~=0.22.0",
     )
     .run_commands(
         "git clone --depth 1 https://github.com/Lightricks/LTX-2.git /opt/LTX-2",
-        "cd /opt/LTX-2 && uv pip install --system -e packages/ltx-core -e packages/ltx-pipelines",
-        "python -c \"import torch, torchvision; from transformers import AutoImageProcessor; print('torch', torch.__version__, 'torchvision', torchvision.__version__)\"",
+        "printf 'torch==2.7.1\\ntorchvision==0.22.1\\ntorchaudio==2.7.1\\n' > /tmp/torch-constraints.txt",
+        "uv pip install --system torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128",
+        "cd /opt/LTX-2 && uv pip install --system -c /tmp/torch-constraints.txt -e packages/ltx-core -e packages/ltx-pipelines",
+        "python -c \"import torch, torchvision, torchaudio; from transformers import AutoImageProcessor; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'torchvision', torchvision.__version__, 'torchaudio', torchaudio.__version__)\"",
     )
     .env(
         {
@@ -159,12 +159,10 @@ def _send_webhook(webhook_url: str | None, payload: dict[str, Any]) -> None:
 
 
 def _gemma_snapshot_error(root: Path) -> str | None:
-    """Return a useful error when the local Gemma snapshot is incomplete/corrupt."""
     missing = [name for name in GEMMA_REQUIRED_FILES if not (root / name).is_file()]
     if missing:
         return f"missing files: {', '.join(missing)}"
 
-    # Xet/LFS pointer files are tiny. Real Gemma shards are several GB each.
     undersized = [
         shard
         for shard in GEMMA_SHARDS
@@ -220,7 +218,6 @@ def _download_valid_gemma(snapshot_download, token: str) -> None:
     cpu=16.0,
     memory=131072,
     timeout=7200,
-    # Keep the warmed worker available while the user is active in the studio.
     scaledown_window=900,
     secrets=[hf_secret],
     volumes={str(MODEL_DIR): model_volume, str(OUTPUT_DIR): output_volume},
@@ -269,7 +266,6 @@ class LipDubRunner:
 
     @modal.method()
     def warmup(self) -> dict[str, Any]:
-        """Start the GPU container and run the @modal.enter model checks."""
         print("[LTX-2.3 LipDub] Warm-up complete; worker is ready.")
         return {"status": "ready", "models": "validated"}
 
@@ -368,9 +364,6 @@ class LipDubRunner:
                     str(seed),
                     "--quantization",
                     "fp8-cast",
-                    # Do not force --offload cpu. On A100-80GB the text encoder
-                    # fits by itself, and the official pipeline frees it before
-                    # constructing the diffusion transformer.
                     "--output-path",
                     str(output_path),
                 ],
