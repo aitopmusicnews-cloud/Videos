@@ -1,4 +1,4 @@
-import { storage } from "./storage.js";
+import { playableUrl, storage } from "./storage.js";
 import { rehostExternalUrl } from "./rehost.js";
 import type { SavedClip } from "@mvs/shared";
 
@@ -18,18 +18,12 @@ export async function saveClip(input: {
   model?: string | null;
   generationTaskId?: string | null;
 }): Promise<SavedClip> {
-  // rehostExternalUrl is the single source of truth for "make this URL
-  // durable on our storage backend": owned URLs (already on /storage or
-  // our S3 bucket) pass through; external URLs (Runway etc.) get downloaded
-  // and re-uploaded via storage.saveUpload, so the result is always on the
-  // configured backend (S3 in prod, local disk in dev). Metadata goes through
-  // the same backend, so saved clips persist across container restarts.
-  const videoUrl = await rehostExternalUrl(input.videoUrl, ".mp4");
+  const durableVideoUrl = await rehostExternalUrl(input.videoUrl, ".mp4");
 
   const saved: SavedClip = {
     id: input.id,
     name: input.name,
-    videoUrl,
+    videoUrl: durableVideoUrl,
     source: input.source,
     prompt: input.prompt,
     duration: input.duration,
@@ -41,7 +35,7 @@ export async function saveClip(input: {
   };
 
   await storage.saveJson(clipMetaKey(input.id), saved);
-  return saved;
+  return { ...saved, videoUrl: await playableUrl(saved.videoUrl) };
 }
 
 export async function listClips(): Promise<SavedClip[]> {
@@ -50,11 +44,13 @@ export async function listClips(): Promise<SavedClip[]> {
   for (const key of keys) {
     if (!key.endsWith("/clip.json")) continue;
     try {
-      const c = await storage.loadJson<SavedClip>(key);
-      if (c) clips.push(c);
-    } catch { /* skip corrupt */ }
+      const clip = await storage.loadJson<SavedClip>(key);
+      if (clip) clips.push({ ...clip, videoUrl: await playableUrl(clip.videoUrl) });
+    } catch {
+      // Skip corrupt or inaccessible metadata entries.
+    }
   }
-  clips.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+  clips.sort((a, b) => (b.savedAt ?? "").localeCompare(a.savedAt ?? ""));
   return clips;
 }
 
