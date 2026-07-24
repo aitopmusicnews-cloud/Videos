@@ -10,7 +10,7 @@ import { Timeline } from "../components/Timeline.js";
 import { TimelineDropzone } from "../components/TimelineDropzone.js";
 import { VideoPreview } from "../components/VideoPreview.js";
 import { Toasts } from "../components/Toasts.js";
-import { AutoDirector } from "../components/AutoDirector.js";
+import { LtxDirectorAgent } from "../components/LtxDirectorAgent.js";
 import { DirectorReferenceChat } from "../components/DirectorReferenceChat.js";
 import { PromoRangeSelector } from "../components/PromoRangeSelector.js";
 
@@ -80,7 +80,7 @@ export function Editor() {
       </main>
       <RightSidebar />
       {analysis ? <Timeline /> : <TimelineDropzone />}
-      <AutoDirector />
+      <LtxDirectorAgent />
       <DirectorReferenceChat />
       <PromoRangeSelector />
       <Toasts />
